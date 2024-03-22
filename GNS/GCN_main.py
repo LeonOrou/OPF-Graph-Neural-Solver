@@ -121,7 +121,8 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
                 gens[:, G['Pmax']] - gens[:, G['Pg_set']]) * lambda_
 
     # if Pg is larger than Pmax in any value of the same index, this should be impossible!
-    if torch.rand(1) < 0.1:
+    rnd_o1 = torch.rand(1)
+    if rnd_o1 < 0.1:
         # if torch.any(Pg_new > gens[:, G['Pmax']]):
         print(f'lambda: {lambda_}')
     qg_new_start = buses[:, B['Qd']] - buses[:, B['Bs']] * v**2
@@ -144,10 +145,10 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
 
 
 def local_power_imbalance(v, theta, buses, lines, gens, B, L, G):
-    delta_p_base = -buses[:, B['Pd']] - (buses[:, B['Gs']] * v**2)
+    delta_p_base = -buses[:, B['Pd']] - buses[:, B['Gs']] * v**2
     delta_p_gens = [gens[:, G['Pg']][gens[:, G['bus_i']].int() - 1 == i] if i in gens[:, G['bus_i']].int() - 1 else 0. for i in range(buses.shape[0])]
     delta_p_start = delta_p_base + torch.tensor(delta_p_gens)
-    delta_q_start = buses[:, B['qg']] - buses[:, B['Qd']] - (buses[:, B['Bs']] * v**2)
+    delta_q_start = buses[:, B['qg']] - buses[:, B['Qd']] - buses[:, B['Bs']] * v**2
 
     # TODO: change delta_p and delta_q computation such that it is a torch.scatter_add_() operation
     src = torch.tensor((lines[:, L['f_bus']]).int() - 1, dtype=torch.int64)
@@ -156,15 +157,15 @@ def local_power_imbalance(v, theta, buses, lines, gens, B, L, G):
     delta_ij = v[src] - v[dst]
     theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
 
-    p_msg_from = v[src] * v[dst] * y_ij[src] / lines[:, L['tau']] * torch.sin(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij) + ((v[src] / lines[:, L['tau']]) ** 2 * y_ij[src] * torch.sin(delta_ij[src]))
-    p_msg_to = v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']] * torch.sin(theta[dst] - theta[src] - delta_ij[dst] - theta_shift_ij) + (v[dst] ** 2 * y_ij[dst] * torch.sin(delta_ij[dst]))
+    p_msg_from = v[src] * v[dst] * y_ij[src] / lines[:, L['tau']] * torch.sin(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij) + (v[src] / lines[:, L['tau']]) ** 2 * y_ij[src] * torch.sin(delta_ij[src])
+    p_msg_to = v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']] * torch.sin(theta[dst] - theta[src] - delta_ij[dst] - theta_shift_ij) + v[dst] ** 2 * y_ij[dst] * torch.sin(delta_ij[dst])
 
     p_sum_from = scatter_add(p_msg_from, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     p_sum_to = scatter_add(p_msg_to, src, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     delta_p = delta_p_start + p_sum_from + p_sum_to
 
-    q_msg_from = -v[src] * v[dst] * y_ij[src] / lines[:, L['tau']] * torch.cos(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij) + ((v[src] / lines[:, L['tau']]) ** 2 * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']] / 2))
-    q_msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']] * torch.cos(theta[dst] - theta[src] - delta_ij[dst] - theta_shift_ij) + (v[dst]**2 * (y_ij[dst] * torch.cos(delta_ij[dst]) - lines[:, L['b']] / 2))  # last cos is sin in paper??? Shouldnt be true as the complex power is with cos
+    q_msg_from = -v[src] * v[dst] * y_ij[src] / lines[:, L['tau']] * torch.cos(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij) + (v[src] / lines[:, L['tau']]) ** 2 * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']] / 2)
+    q_msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']] * torch.cos(theta[dst] - theta[src] - delta_ij[dst] - theta_shift_ij) + v[dst] ** 2 * (y_ij[dst] * torch.cos(delta_ij[dst]) - lines[:, L['b']] / 2)  # last cos is sin in paper??? Shouldnt be true as the complex power is with cos
 
     q_sum_from = scatter_add(q_msg_from, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     q_sum_to = scatter_add(q_msg_to, src, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
@@ -277,7 +278,7 @@ if torch.cuda.is_available():
 model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
 torch.autograd.set_detect_anomaly(True)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 n_runs = 10 ** 6  # 10**6 used in paper
 best_loss = torch.tensor(float('inf'))
