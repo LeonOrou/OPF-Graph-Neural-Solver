@@ -144,11 +144,14 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     return lambda_, Pg_new, qg_new
 
 
-def local_power_imbalance(v, theta, buses, lines, gens, B, L, G):
-    delta_p_base = -buses[:, B['Pd']] - buses[:, B['Gs']] * v**2
-    delta_p_gens = [gens[:, G['Pg']][gens[:, G['bus_i']].int() - 1 == i] if i in gens[:, G['bus_i']].int() - 1 else 0. for i in range(buses.shape[0])]
+def local_power_imbalance(v, theta, buses, lines, gens, pg_k, qg_k, B, L, G):
+    delta_p_base = -buses[:, B['Pd']] - buses[:, B['Gs']] * v ** 2
+    # delta_p_gens = [gens[:, G['Pg']][gens[:, G['bus_i']].int() - 1 == i] if i in gens[:, G['bus_i']].int() - 1 else 0. for i in range(buses.shape[0])]
+    delta_p_gens = [pg_k[gens[:, G['bus_i']].int() - 1 == i] if i in gens[:, G['bus_i']].int() - 1 else 0.
+                    for i in range(buses.shape[0])]
     delta_p_start = delta_p_base + torch.tensor(delta_p_gens)
-    delta_q_start = buses[:, B['qg']] - buses[:, B['Qd']] - buses[:, B['Bs']] * v**2
+    # delta_q_start = buses[:, B['qg']] - buses[:, B['Qd']] - buses[:, B['Bs']] * v**2
+    delta_q_start = qg_k - buses[:, B['Qd']] - buses[:, B['Bs']] * v ** 2
 
     # TODO: change delta_p and delta_q computation such that it is a torch.scatter_add_() operation
     src = torch.tensor((lines[:, L['f_bus']]).int() - 1, dtype=torch.int64)
@@ -170,7 +173,7 @@ def local_power_imbalance(v, theta, buses, lines, gens, B, L, G):
     q_sum_from = scatter_add(q_msg_from, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     q_sum_to = scatter_add(q_msg_to, src, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     delta_q = delta_q_start + q_sum_from + q_sum_to
-
+    # print(f'delta_p: {delta_p}')
     return delta_p, delta_q
 
 
@@ -193,7 +196,7 @@ class GNS(nn.Module):
             # self.phi_loop[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
             # self.correction_block[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
             self.phi["theta_" + str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
-            self.phi["v_" + str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
+            self.phi["v" + str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
             self.phi["m_" + str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
             # self.phi[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
             self.L_theta[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=1)
@@ -236,7 +239,7 @@ class GNS(nn.Module):
         for k in range(self.K):
             phi_input = torch.cat((m[dst], lines[:, 2:]), dim=1)
             phi_res_theta = self.phi["theta_"+str(k)](phi_input).squeeze()
-            phi_res_v = self.phi["v_"+str(k)](phi_input).squeeze()
+            phi_res_v = self.phi["v"+str(k)](phi_input).squeeze()
             phi_res_m = self.phi["m_"+str(k)](phi_input).squeeze()
             phi_sum_theta = scatter_add(phi_res_theta, src, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
             phi_sum_v = scatter_add(phi_res_v, src, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
@@ -259,11 +262,11 @@ class GNS(nn.Module):
 
             lambda_, Pg_new, qg_new = global_active_compensation(v, theta, buses, lines, generators, B, L, G)
             # no matrix afterwards as Pg is last column
-            generators = torch.cat((generators[:, :G['Pg']], Pg_new.unsqueeze(dim=1)), dim=1)
-            buses = torch.cat((buses[:, :B['qg']], qg_new.unsqueeze(dim=1), buses[:, B['qg'] + 1:]), dim=1)
-            delta_p, delta_q = local_power_imbalance(v, theta, buses, lines, generators, B, L, G)
+            # generators = torch.cat((generators[:, :G['Pg']], Pg_new.unsqueeze(dim=1)), dim=1)
+            # buses = torch.cat((buses[:, :B['qg']], qg_new.unsqueeze(dim=1), buses[:, B['qg'] + 1:]), dim=1)
+            delta_p, delta_q = local_power_imbalance(v, theta, buses, lines, generators, Pg_new, qg_new, B, L, G)
 
-            total_loss = total_loss + self.gamma ** (self.K - k) * (torch.sum(delta_p.pow(2) + delta_q.pow(2)) / buses.shape[0])
+            total_loss = total_loss + self.gamma**(self.K - k) * torch.sum(delta_p.pow(2) + delta_q.pow(2)) / buses.shape[0]
 
         return v, theta, total_loss
 
@@ -272,7 +275,7 @@ class GNS(nn.Module):
 latent_dim = 10  # increase later
 hidden_dim = 10  # increase later
 gamma = 0.9
-K = 8  # correction updates, 30 in paper, less for debugging
+K = 7  # correction updates, 30 in paper, less for debugging
 if torch.cuda.is_available():
     torch.set_default_device('cuda')
 model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
@@ -301,13 +304,13 @@ for run in range(n_runs):
 
     if loss >= best_loss:
         loss_increase_counter += 1
-        if loss_increase_counter > 50:
+        if loss_increase_counter > 10:
             print('Loss is increasing')
             break
     else:
         best_loss = loss.data
         best_model = model
         loss_increase_counter = 0
-        torch.save(best_model.state_dict(), f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_I{run}.pth')
+        # torch.save(best_model.state_dict(), f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_I{run}.pth')
     if run % print_every == 0:
         print(f'Run: {run}, Loss: {loss}, best loss: {best_loss}')
