@@ -3,6 +3,7 @@ from torch_scatter import scatter_add
 from torch import index_add
 import torch.nn as nn
 import random
+import math
 import pickle as pkl
 from torch_geometric.data import Data
 from torch_geometric.nn import MessagePassing
@@ -177,9 +178,9 @@ def local_power_imbalance(v, theta, buses, lines, gens, pg_k, qg_k, B, L, G):
     return delta_p, delta_q
 
 
-class GNS(nn.Module):
+class GCN(nn.Module):
     def __init__(self, latent_dim=10, hidden_dim=10, K=30, gamma=0.9):
-        super(GNS, self).__init__()
+        super(GCN, self).__init__()
         # self.correction_block = nn.ModuleDict()
 
         # self.phi_from = nn.ModuleDict()
@@ -202,6 +203,11 @@ class GNS(nn.Module):
             self.L_theta[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=1)
             self.L_v[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=1)
             self.L_m[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=latent_dim)
+
+            # TODO: make Decoder Network D (no endcoder as initial values are given)
+            # self.E = LearningBlock(dim_in=latent_dim, hidden_dim=hidden_dim, dim_out=1)
+            self.D = LearningBlock(dim_in=latent_dim, hidden_dim=hidden_dim, dim_out=1)
+
         self.gamma = gamma
         self.K = K
 
@@ -236,7 +242,10 @@ class GNS(nn.Module):
         # out = outer_lin(torch.cat((x, aggregated_neighbor_features), dim=1))
         src = lines[:, 0].long() - 1  # Compute i and j for all lines at once
         dst = lines[:, 1].long() - 1
+        # src = torch.cat((src, dst), dim=0)
+        # dst = torch.cat((dst, src[:math.ceil(len(src)/2)]), dim=0)
         for k in range(self.K):
+            # TODO: make phi message as sum of messages from all !direct! neighbors
             phi_input = torch.cat((m[dst], lines[:, 2:]), dim=1)
             phi_res_theta = self.phi["theta_"+str(k)](phi_input).squeeze()
             phi_res_v = self.phi["v"+str(k)](phi_input).squeeze()
@@ -268,6 +277,7 @@ class GNS(nn.Module):
 
             total_loss = total_loss + self.gamma**(self.K - k) * torch.sum(delta_p.pow(2) + delta_q.pow(2)) / buses.shape[0]
 
+
         return v, theta, total_loss
 
 
@@ -278,7 +288,7 @@ gamma = 0.9
 K = 7  # correction updates, 30 in paper, less for debugging
 if torch.cuda.is_available():
     torch.set_default_device('cuda')
-model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
+model = GCN(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
 torch.autograd.set_detect_anomaly(True)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -292,7 +302,7 @@ case_nr = 14  # 14, 30, 118, 300
 for run in range(n_runs):
     # sample from different grids
     augmentation_nr = random.randint(1, 10)  # random augmentation of the 10
-    # augmentation_nr = 0  # 0 is not modified case
+    # augmentation_nr = 1  # 0 is not modified case
     buses, lines, generators = prepare_grid(case_nr, augmentation_nr)
 
     v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
@@ -314,3 +324,6 @@ for run in range(n_runs):
         # torch.save(best_model.state_dict(), f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_I{run}.pth')
     if run % print_every == 0:
         print(f'Run: {run}, Loss: {loss}, best loss: {best_loss}')
+
+
+
