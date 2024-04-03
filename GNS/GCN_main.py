@@ -74,15 +74,15 @@ class LearningBlock(nn.Module):  # later change hidden dim to more dims, current
     def __init__(self, dim_in, hidden_dim, dim_out):
         super(LearningBlock, self).__init__()
         self.linear1 = nn.Linear(dim_in, hidden_dim)
-        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+        # self.linear2 = nn.Linear(hidden_dim, hidden_dim)
         self.linear3 = nn.Linear(hidden_dim, dim_out)
         self.lrelu = nn.LeakyReLU()
 
     def forward(self, x):
         x = self.linear1(x)
         x = self.lrelu(x)
-        x = self.linear2(x)
-        x = self.lrelu(x)
+        # x = self.linear2(x)
+        # x = self.lrelu(x)
         x = self.linear3(x)
         return x
 
@@ -260,32 +260,45 @@ class GCN(nn.Module):
         self.phi_from = nn.ModuleDict()
         self.phi_to = nn.ModuleDict()
         self.phi_loop = nn.ModuleDict()
+        self.correction_block = nn.ModuleDict()
+        self.D = nn.ModuleDict()
         self.L_theta = nn.ModuleDict()
         self.L_v = nn.ModuleDict()
         self.L_m = nn.ModuleDict()
 
         for k in range(K):
-            # self.phi_from[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
-            # self.phi_to[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
-            # self.phi_loop[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
-            # self.correction_block[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
-            self.phi_from[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
-            self.phi_to[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
-            self.phi_loop[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
-            # self.phi[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, 1)
-            self.L_theta[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=1)
-            self.L_v[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=1)
-            self.L_m[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=latent_dim)
+            self.phi_from[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
+            self.phi_to[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
+            self.phi_loop[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
+
+            self.L_theta[str(k)] = LearningBlock(dim_in=4 + 4 * latent_dim, hidden_dim=hidden_dim, dim_out=1)
+            self.L_v[str(k)] = LearningBlock(dim_in=4 + 4 * latent_dim, hidden_dim=hidden_dim, dim_out=1)
+            self.L_m[str(k)] = LearningBlock(dim_in=4 + 4 * latent_dim, hidden_dim=hidden_dim, dim_out=latent_dim)
 
             # TODO: make Decoder Network D (no endcoder as initial values are given)
             # self.E = LearningBlock(dim_in=latent_dim, hidden_dim=hidden_dim, dim_out=1)
-            self.D = LearningBlock(dim_in=latent_dim, hidden_dim=hidden_dim, dim_out=1)
+            self.D[str(k)] = LearningBlock(dim_in=latent_dim, hidden_dim=hidden_dim, dim_out=1)
 
         self.latent_dim = latent_dim
         self.gamma = gamma
         self.K = K
 
     def forward(self, buses, lines, generators, B, L, G):
+        # TODO: normalizing all data by subtracting mean and dividing by std
+        # buses_mean = torch.mean(buses[:, 1:], dim=0)
+        # lines_mean = torch.mean(lines[:, 2:], dim=0)
+        # generators_mean = torch.mean(generators[:, 1:], dim=0)
+        # buses[:, 1:] = buses[:, 1:] - buses_mean
+        # # buses[:, 1:] = buses[:, 1:] / torch.std(buses[:, 1:], dim=0)
+        # lines[:, 2:] = lines[:, 2:] - lines_mean
+        # # lines[:, 2:] = lines[:, 2:] / torch.std(lines[:, 2:], dim=0)
+        # generators[:, 1:] = generators[:, 1:] - generators_mean
+        # # generators[:, 1:] = generators[:, 1:] / torch.std(generators[:, 1:], dim=0)
+        # buses = torch.nan_to_num(buses)
+        # lines = torch.nan_to_num(lines)
+        # generators = torch.nan_to_num(generators)
+
+        alpha = 0.001
         edge_index = torch.tensor(lines[:, :2].t().long(), dtype=torch.long)
         edge_attr = lines[:, 2:].t()
         x = buses[:, 1:]
@@ -294,9 +307,8 @@ class GCN(nn.Module):
         m = torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32)
         v = torch.ones((buses.shape[0]), dtype=torch.float32)
         theta = torch.zeros((buses.shape[0]), dtype=torch.float32)
-        delta_p = torch.zeros((generators.shape[0]), dtype=torch.float32)
-        delta_q = torch.zeros((generators.shape[0]), dtype=torch.float32)
         total_loss = 0.
+        total_loss_net = 0.
 
         v[generators[:, G['bus_i']].long() - 1] = generators[:, G['vg']]
         delta_p = -buses[:, B['Pd']] - buses[:, B['Gs']] * v.pow(2)
@@ -317,33 +329,39 @@ class GCN(nn.Module):
         # out = outer_lin(torch.cat((x, aggregated_neighbor_features), dim=1))
         src = lines[:, 0].long() - 1  # Compute i and j for all lines at once
         dst = lines[:, 1].long() - 1
+        loop_mask = torch.eq(src, dst)
         # src = torch.cat((src, dst), dim=0)
         # dst = torch.cat((dst, src[:math.ceil(len(src)/2)]), dim=0)
         for k in range(self.K):
             # TODO: make phi message as sum of messages from all !direct! neighbors
             # TODO: make phi messages like in github, the delta p and q seems to work but the messages are bullshit
-            phi_from_input = torch.cat((m[src], lines[:, 2:]), dim=1)
-            phi_to_input = torch.cat((m[dst], lines[:, 2:]), dim=1)
-            phi_loop_input = torch.cat((m[dst], lines[:, 2:]), dim=1)
+            phi_from_input = torch.cat((m[src], lines[:, 2:]), dim=1) * (1-loop_mask)
+            phi_to_input = torch.cat((m[dst], lines[:, 2:]), dim=1) * (1-loop_mask)
+            phi_loop_input = torch.cat((m[dst], lines[:, 2:]), dim=1) * loop_mask
             phi_res_theta = self.phi_from[str(k)](phi_from_input).squeeze()
             phi_res_v = self.phi_to[str(k)](phi_to_input).squeeze()
             phi_res_m = self.phi_loop[str(k)](phi_loop_input).squeeze()
-            phi_from_sum = scatter_add(phi_res_theta, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
-            phi_to_sum = scatter_add(phi_res_v, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
-            phi_loop_sum = scatter_add(phi_res_m, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
-            phi_sum = phi_from_sum + phi_to_sum + phi_loop_sum
-            network_input = torch.cat((v.unsqueeze(1), theta.unsqueeze(1), delta_p.unsqueeze(1), delta_q.unsqueeze(1), m, phi_sum.unsqueeze(1)), dim=1)
+            phi_from_sum = scatter_add(phi_res_theta, dst, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
+            phi_to_sum = scatter_add(phi_res_v, dst, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
+            phi_loop_sum = scatter_add(phi_res_m, dst, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
+            # phi_sum = phi_from_sum + phi_to_sum + phi_loop_sum
+            network_input = torch.cat((v.unsqueeze(1), theta.unsqueeze(1), delta_p.unsqueeze(1), delta_q.unsqueeze(1), m, phi_from_sum, phi_to_sum, phi_loop_sum), dim=1)
 
             theta_update = self.L_theta[str(k)](network_input)
-            theta = theta + theta_update.squeeze()
+            theta = theta + theta_update.squeeze() * alpha
 
             v_update = self.L_v[str(k)](network_input)
             non_gens_mask = torch.ones_like(v, dtype=torch.bool)
             non_gens_mask[generators[:, G['bus_i']].long() - 1] = False
-            v = torch.where(non_gens_mask, v + v_update.squeeze(), v)
+            v = torch.where(non_gens_mask, v + v_update.squeeze() * alpha, v)
 
             m_update = self.L_m[str(k)](network_input)
-            m = m + m_update
+            m = m + m_update * alpha
+
+            # v_net = self.D[str(k)](m).squeeze()
+            # Pg_new_net, qg_new_net = global_active_compensation(v_net, theta, buses, lines, generators, B, L, G)
+            # delta_p_net, delta_q_net = local_power_imbalance(v_net, theta, buses, lines, generators, Pg_new_net, qg_new_net, B, L, G)
+            # total_loss_net = total_loss_net + torch.sum(delta_p_net.pow(2) + delta_q_net.pow(2)) / buses.shape[0]
 
             Pg_new, qg_new = global_active_compensation(v, theta, buses, lines, generators, B, L, G)
             # no matrix afterwards as Pg is last column
@@ -352,7 +370,9 @@ class GCN(nn.Module):
             delta_p, delta_q = local_power_imbalance(v, theta, buses, lines, generators, Pg_new, qg_new, B, L, G)
 
             total_loss = total_loss + self.gamma**(self.K - k) * torch.sum(delta_p.pow(2) + delta_q.pow(2)) / buses.shape[0]
-
+            # rng_int = torch.randint(0, 1, (1,))
+            # if rng_int < 0.3:
+            #     print(f'Loss Net: {total_loss_net}')
         # TODO: make Decoder Network D (no endcoder as initial values are given)
         return v, theta, total_loss
 
