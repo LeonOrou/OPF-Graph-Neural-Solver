@@ -258,7 +258,7 @@ class GCN(nn.Module):
         # self.correction_block = nn.ModuleDict()
 
         self.phi_from = nn.ModuleDict()
-        self.phi_to = nn.ModuleDict()
+        # self.phi_to = nn.ModuleDict()
         self.phi_loop = nn.ModuleDict()
         self.correction_block = nn.ModuleDict()
         self.D = nn.ModuleDict()
@@ -268,12 +268,12 @@ class GCN(nn.Module):
 
         for k in range(K):
             self.phi_from[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
-            self.phi_to[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
+            # self.phi_to[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
             self.phi_loop[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
 
-            self.L_theta[str(k)] = LearningBlock(dim_in=4 + 4 * latent_dim, hidden_dim=hidden_dim, dim_out=1)
-            self.L_v[str(k)] = LearningBlock(dim_in=4 + 4 * latent_dim, hidden_dim=hidden_dim, dim_out=1)
-            self.L_m[str(k)] = LearningBlock(dim_in=4 + 4 * latent_dim, hidden_dim=hidden_dim, dim_out=latent_dim)
+            self.L_theta[str(k)] = LearningBlock(dim_in=4 + 2 * latent_dim, hidden_dim=hidden_dim, dim_out=1)
+            self.L_v[str(k)] = LearningBlock(dim_in=4 + 2 * latent_dim, hidden_dim=hidden_dim, dim_out=1)
+            self.L_m[str(k)] = LearningBlock(dim_in=4 + 2 * latent_dim, hidden_dim=hidden_dim, dim_out=latent_dim)
 
             # TODO: make Decoder Network D (no endcoder as initial values are given)
             # self.E = LearningBlock(dim_in=latent_dim, hidden_dim=hidden_dim, dim_out=1)
@@ -329,23 +329,22 @@ class GCN(nn.Module):
         # out = outer_lin(torch.cat((x, aggregated_neighbor_features), dim=1))
         src = lines[:, 0].long() - 1  # Compute i and j for all lines at once
         dst = lines[:, 1].long() - 1
-        loop_mask = torch.eq(src, dst)
+        # loop_mask = torch.eq(src, dst)
         # src = torch.cat((src, dst), dim=0)
         # dst = torch.cat((dst, src[:math.ceil(len(src)/2)]), dim=0)
         for k in range(self.K):
             # TODO: make phi message as sum of messages from all !direct! neighbors
             # TODO: make phi messages like in github, the delta p and q seems to work but the messages are bullshit
-            phi_from_input = torch.cat((m[src], lines[:, 2:]), dim=1) * (1-loop_mask)
-            phi_to_input = torch.cat((m[dst], lines[:, 2:]), dim=1) * (1-loop_mask)
-            phi_loop_input = torch.cat((m[dst], lines[:, 2:]), dim=1) * loop_mask
-            phi_res_theta = self.phi_from[str(k)](phi_from_input).squeeze()
-            phi_res_v = self.phi_to[str(k)](phi_to_input).squeeze()
-            phi_res_m = self.phi_loop[str(k)](phi_loop_input).squeeze()
-            phi_from_sum = scatter_add(phi_res_theta, dst, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
-            phi_to_sum = scatter_add(phi_res_v, dst, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
-            phi_loop_sum = scatter_add(phi_res_m, dst, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
-            # phi_sum = phi_from_sum + phi_to_sum + phi_loop_sum
-            network_input = torch.cat((v.unsqueeze(1), theta.unsqueeze(1), delta_p.unsqueeze(1), delta_q.unsqueeze(1), m, phi_from_sum, phi_to_sum, phi_loop_sum), dim=1)
+            phi_from_input = torch.cat((m[dst], lines[:, 2:]), dim=1)
+            # phi_to_input = torch.cat((m[dst], lines[:, 2:]), dim=1) * (1-loop_mask)
+            # phi_loop_input = torch.cat((m[dst], lines[:, 2:]), dim=1)
+            # ?only "phi_from" because we collect information only "from" neighbors
+            phi_from_input = self.phi_from[str(k)](phi_from_input)
+            phi_from_sum = scatter_add(phi_from_input, src, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
+            # phi_to_sum = scatter_add(phi_res_v, dst, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
+            # phi_loop_sum = scatter_add(phi_res_m, dst, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
+
+            network_input = torch.cat((v.unsqueeze(1), theta.unsqueeze(1), delta_p.unsqueeze(1), delta_q.unsqueeze(1), m, phi_from_sum), dim=1)
 
             theta_update = self.L_theta[str(k)](network_input)
             theta = theta + theta_update.squeeze() * alpha
