@@ -67,7 +67,7 @@ def prepare_grid(case_nr, augmentation_nr):
     generators = torch.tensor(gen_data[:, [0, 8, 9, 1, 5, 2]], dtype=torch.float32)
     generators = torch.cat((generators, generators[:, 3].unsqueeze(dim=1)), dim=1)  # add changable Pg and leave original Pg as Pg_set
     # Normalizing the Power P, Q
-    generators[:, [1, 2, 3, 5, 6]] /= baseMV
+    generators[:, [1, 2, 3, 4, 5, 6]] /= baseMV  # TODO: remove 4 (vg) if not working!
     return buses, lines, generators
 
 
@@ -124,7 +124,7 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
 
     # if Pg is larger than Pmax in any value of the same index, this should be impossible!
     rnd_o1 = torch.rand(1)
-    if rnd_o1 < 0.01:
+    if rnd_o1 < 0.03:
         # if torch.any(Pg_new > gens[:, G['Pmax']]):
         print(f'lambda: {lambda_}')
     qg_new_start = buses[:, B['Qd']] - buses[:, B['Bs']] * v ** 2
