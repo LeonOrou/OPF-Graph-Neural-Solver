@@ -51,8 +51,8 @@ def prepare_grid(case_nr, augmentation_nr):
     buses = torch.tensor(bus_data[:, [0, 1, 2, 3, 4, 5]], dtype=torch.float32)
     # Gs and Bs have defaults of 1 in paper, but 0 in matpower
     # Bs is not everywhere 0, but in paper it is everywhere 1 p.u. (of the Qd?)
-    buses[:, 4] = buses[:, 3]
-    buses[:, 5] = buses[:, 3]
+    # buses[:, 4] = buses[:, 3]
+    # buses[:, 5] = buses[:, 3]
     baseMV = 100  # set to 100 in GitHub, no default in Matpower
     buses[:, [4, 5]] /= baseMV  # normalize Gs and Bs to gs and bs by dividing by baseMV
     buses = torch.cat((buses, torch.zeros((buses.shape[0], 1), dtype=torch.float32)), dim=1)  # add qg column for inserting values
@@ -232,7 +232,7 @@ class GNS(nn.Module):
         # lines[:, [2, 3, 4, 6]] = (lines[:, [2, 3, 4, 6]] - lines_mean) / lines_std
         # generators[:, [1, 3, 4, 5, 6]] = (generators[:, [1, 3, 4, 5, 6]] - generators_mean) / generators_std
 
-        alpha = 1/self.K
+        alpha = 1/self.K  # update rate from networks for next parameters
         edge_index = torch.tensor(lines[:, :2].t().long(), dtype=torch.long)
         edge_attr = lines[:, 2:].t()
         x = buses[:, 1:]
