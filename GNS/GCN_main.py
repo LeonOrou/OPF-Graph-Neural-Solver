@@ -66,7 +66,7 @@ def prepare_grid(case_nr, augmentation_nr):
     gen_data = torch.tensor(case_augmented['gen'], dtype=torch.float32)
     generators = torch.tensor(gen_data[:, [0, 8, 9, 1, 5, 2]], dtype=torch.float32)
     generators = torch.cat((generators, generators[:, 3].unsqueeze(dim=1)), dim=1)  # add changable Pg and leave original Pg as Pg_set
-    # Normalizing the Power P, Q and ?S
+    # Normalizing the Power P, Q
     generators[:, [1, 2, 3, 5, 6]] /= baseMV
     return buses, lines, generators
 
@@ -75,30 +75,29 @@ class LearningBlock(nn.Module):  # later change hidden dim to more dims, current
     def __init__(self, dim_in, hidden_dim, dim_out):
         super(LearningBlock, self).__init__()
         self.linear1 = nn.Linear(dim_in, hidden_dim)
-        # self.linear2 = nn.Linear(hidden_dim, hidden_dim)
-        self.linear3 = nn.Linear(hidden_dim, dim_out)
+        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+        # self.linear3 = nn.Linear(hidden_dim, hidden_dim)
+        self.linear4 = nn.Linear(hidden_dim, dim_out)
         self.lrelu = nn.LeakyReLU()
 
     def forward(self, x):
         x = self.linear1(x)
         x = self.lrelu(x)
-        # x = self.linear2(x)
+        x = self.linear2(x)
         # x = self.lrelu(x)
-        x = self.linear3(x)
+        # x = self.linear3(x)
+        x = self.lrelu(x)
+        x = self.linear4(x)
         return x
 
 
 def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     src = torch.tensor((lines[:, L['f_bus']]).int() - 1, dtype=torch.int64)
     dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
-    edge_index = torch.tensor(lines[:, :2].t().long(), dtype=torch.long)
-    # make undirected graph
-    edge_index = torch.cat((edge_index, torch.flip(edge_index, dims=[0])), dim=1)
-    edge_index, _ = add_self_loops(edge_index, num_nodes=buses.size(0))
 
     y_ij = 1 / torch.sqrt(lines[:, L['r']] ** 2 + lines[:, L['x']] ** 2)
     # delta_ij refers to v difference between i and j, not the angle difference
-    delta_ij = v[src] - v[dst]
+    delta_ij = theta[src] - theta[dst]
     theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
     msg = torch.abs(v[src] * v[dst] * y_ij / lines[:, L['tau']] * (torch.sin(theta[src] - theta[dst] - delta_ij - theta_shift_ij) + torch.sin(theta[dst] - theta[src] - delta_ij + theta_shift_ij)) + (v[src] / lines[:, L['tau']] ** 2) * y_ij * torch.sin(delta_ij) + v[dst] ** 2 * y_ij * torch.sin(delta_ij))
     aggregated_neighbor_features = scatter_add(msg, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
@@ -125,7 +124,7 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
 
     # if Pg is larger than Pmax in any value of the same index, this should be impossible!
     rnd_o1 = torch.rand(1)
-    if rnd_o1 < 0.15:
+    if rnd_o1 < 0.01:
         # if torch.any(Pg_new > gens[:, G['Pmax']]):
         print(f'lambda: {lambda_}')
     qg_new_start = buses[:, B['Qd']] - buses[:, B['Bs']] * v ** 2
@@ -161,7 +160,7 @@ def local_power_imbalance(v, theta, buses, lines, gens, pg_k, qg_k, B, L, G):
     src = torch.tensor((lines[:, L['f_bus']]).int() - 1, dtype=torch.int64)
     dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
     y_ij = 1 / torch.sqrt(lines[:, L['r']] ** 2 + lines[:, L['x']] ** 2)
-    delta_ij = v[src] - v[dst]
+    delta_ij = theta[src] - theta[dst]
     theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
 
     p_msg_from = v[src] * v[dst] * y_ij[src] / lines[:, L['tau']] * torch.sin(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij) + (v[src] / lines[:, L['tau']]) ** 2 * y_ij[src] * torch.sin(delta_ij[src])
@@ -172,7 +171,7 @@ def local_power_imbalance(v, theta, buses, lines, gens, pg_k, qg_k, B, L, G):
     delta_p = delta_p_start + p_sum_from + p_sum_to
 
     q_msg_from = -v[src] * v[dst] * y_ij[src] / lines[:, L['tau']] * torch.cos(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij) + (v[src] / lines[:, L['tau']]) ** 2 * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']] / 2)
-    q_msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']] * torch.cos(theta[dst] - theta[src] - delta_ij[dst] - theta_shift_ij) + v[dst] ** 2 * (y_ij[dst] * torch.cos(delta_ij[dst]) - lines[:, L['b']] / 2)  # last cos is sin in paper??? Shouldnt be true as the complex power is with cos
+    q_msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']] * torch.sin(theta[dst] - theta[src] - delta_ij[dst] - theta_shift_ij) + v[dst] ** 2 * (y_ij[dst] * torch.cos(delta_ij[dst]) - lines[:, L['b']] / 2)  # last cos is sin in paper??? Shouldnt be true as the complex power is with cos
 
     q_sum_from = scatter_add(q_msg_from, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     q_sum_to = scatter_add(q_msg_to, src, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
@@ -298,10 +297,6 @@ class GNS(nn.Module):
             delta_p, delta_q = local_power_imbalance(v, theta, buses, lines, generators, Pg_new, qg_new, B, L, G)
 
             total_loss = total_loss + self.gamma**(self.K - k) * torch.sum(delta_p.pow(2) + delta_q.pow(2)) / buses.shape[0]
-            # rng_int = torch.randint(0, 1, (1,))
-            # if rng_int < 0.3:
-            #     print(f'Loss Net: {total_loss_net}')
-        # TODO: make Decoder Network D (no endcoder as initial values are given)
         return v, theta, total_loss
 
 # Weights and Biases package
@@ -310,9 +305,9 @@ class GNS(nn.Module):
 
 # initialization
 latent_dim = 10  # increase later
-hidden_dim = 10  # increase later
+hidden_dim = 20  # increase later
 gamma = 0.9
-K = 7  # correction updates, 30 in paper, less for debugging
+K = 10  # correction updates, 30 in paper, less for debugging
 if torch.cuda.is_available():
     torch.set_default_device('cuda')
 model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
@@ -324,7 +319,7 @@ n_runs = 10 ** 6  # 10**6 used in paper
 best_loss = torch.tensor(float('inf'))
 best_model = model
 loss_increase_counter = 0
-print_every = 10
+print_every = 1
 case_nr = 14  # 14, 30, 118, 300
 for run in range(n_runs):
     # sample from different grids
