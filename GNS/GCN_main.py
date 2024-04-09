@@ -23,19 +23,11 @@ from torch_geometric.utils import add_self_loops, degree
 ## case format: https://rwl.github.io/PYPOWER/api/pypower.caseformat-module.html
 
 def get_BLG():
-    # add column qg to buses with default value 0 as we later use qg for each bus
     B = {'bus_i': 0, 'type': 1, 'Pd': 2, 'Qd': 3, 'Gs': 4, 'Bs': 5, 'qg': 6}  # indices of bus data
 
-    # lines = torch.tensor(branch_data[:, [0, 1, 2, 3, 4, 8, 9]], dtype=torch.float32)
     L = {'f_bus': 0, 't_bus': 1, 'r': 2, 'x': 3, 'b': 4, 'tau': 5, 'theta': 6}  # indices of branch data
-    # if tau=0, set it to 1: 0 is default in pypower, but matpower default is 1 (ratio cant be 0)
-    # lines[:, L['tau']] = torch.where(lines[:, L['tau']] == 0, 1, lines[:, L['tau']])
 
-    # generators = torch.tensor(gen_data[:, [0, 8, 9, 1, 5, 2]], dtype=torch.float32)
     G = {'bus_i': 0, 'Pmax': 1, 'Pmin': 2, 'Pg_set': 3, 'vg': 4, 'qg': 5, 'Pg': 6}  # indices of generator data
-    # generators[generators_data[:, G['bus_i']].int() - 1] = generators_data  # -1 as bus indices start from 1
-    # generators[:, G['bus_i']] = torch.tensor(range(1, buses.shape[0]+1))  # set bus indices to match buses, gen indices stay the same
-    # del generators_data  # delete to free memory, use generators for same length as buses
 
     # costs = torch.tensor(cost_data, dtype=torch.float32)  # needed?
     # cost format: model, startup cost, shutdown cost, nr coefficients, cost coefficients
@@ -48,25 +40,25 @@ B, L, G = get_BLG()
 def prepare_grid(case_nr, augmentation_nr):
     case_augmented = pkl.load(open(f'../data/case{case_nr}/augmented_case{case_nr}_{augmentation_nr}.pkl', 'rb'))
     bus_data = torch.tensor(case_augmented['bus'], dtype=torch.float32)
+    lines_data = torch.tensor(case_augmented['branch'], dtype=torch.float32)
+    gen_data = torch.tensor(case_augmented['gen'], dtype=torch.float32)
     buses = torch.tensor(bus_data[:, [0, 1, 2, 3, 4, 5]], dtype=torch.float32)
     # Gs and Bs have defaults of 1 in paper, but 0 in matpower
     # Bs is not everywhere 0, but in paper it is everywhere 1 p.u. (of the Qd?)
     # buses[:, 4] = buses[:, 3]
     # buses[:, 5] = buses[:, 3]
-    baseMV = 100  # set to 100 in GitHub, no default in Matpower
+    baseMV = gen_data[:, 6]  # mostly 100
     buses = torch.cat((buses, torch.zeros((buses.shape[0], 1), dtype=torch.float32)), dim=1)  # add qg column for inserting values
     # normalize all P, Q, Gs and Bs to get gs and bs by dividing by baseMV
     buses[:, [2, 3, 4, 5, 6]] /= baseMV
 
-    lines_data = torch.tensor(case_augmented['branch'], dtype=torch.float32)
     lines = torch.tensor(lines_data[:, [0, 1, 2, 3, 4, 8, 9]], dtype=torch.float32)
     lines[:, L['tau']] = torch.where(lines[:, L['tau']] == 0, 1, lines[:, L['tau']])
 
-    gen_data = torch.tensor(case_augmented['gen'], dtype=torch.float32)
     generators = torch.tensor(gen_data[:, [0, 8, 9, 1, 5, 2]], dtype=torch.float32)
-    generators = torch.cat((generators, generators[:, 3].unsqueeze(dim=1)), dim=1)  # add changable Pg and leave original Pg as Pg_set
+    generators = torch.cat((generators, generators[:, 3].unsqueeze(dim=1)), dim=1)  # copy Pg and concat changable Pg and leave original Pg as Pg_set
     # Normalizing the Power P, Q
-    # generators[:, [1, 2, 3, 5, 6]] /= baseMV  # TODO: remove 4 (vg) if not working!
+    generators[:, [1, 2, 3, 5, 6]] /= baseMV  # TODO: remove 4 (vg) if not working!
     return buses, lines, generators
 
 
@@ -124,22 +116,21 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
 
     # if Pg is larger than Pmax in any value of the same index, this should be impossible!
     rnd_o1 = torch.rand(1)
-    if rnd_o1 < 0.09:
+    if rnd_o1 < 0.02:
         # if torch.any(Pg_new > gens[:, G['Pmax']]):
         print(f'lambda: {lambda_}')
     qg_new_start = buses[:, B['Qd']] - buses[:, B['Bs']] * v ** 2
     src = torch.tensor((lines[:, L['f_bus']]).int() - 1, dtype=torch.int64)
     dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
 
-    y_ij = 1 / torch.sqrt(lines[:, L['r']] ** 2 + lines[:, L['x']] ** 2)
-    delta_ij = theta[src] - theta[dst]
+    delta_ji = theta[dst] - theta[src]
     # theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
     theta_shift_ij = lines[:, L['theta']]
     msg_from = -v[src] * v[dst] * y_ij[src] / lines[:, L['tau']] * torch.cos(
         theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij) + (v[src] / lines[:, L['tau']]) ** 2 * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']] / 2)
     msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']] * torch.cos(
-        theta[dst] - theta[src] - delta_ij[dst] - theta_shift_ij) + v[dst] ** 2 * (
-                         y_ij[dst] * torch.sin(delta_ij[dst]) - lines[:, L['b']] / 2)
+        theta[dst] - theta[src] - delta_ji[dst] - theta_shift_ij) + v[dst] ** 2 * (
+                         y_ij[dst] * torch.sin(delta_ji[dst]) - lines[:, L['b']] / 2)
 
     aggr_from = scatter_add(msg_from, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     aggr_to = scatter_add(msg_to, src, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
@@ -318,7 +309,7 @@ n_runs = 10 ** 6  # 10**6 used in paper
 best_loss = torch.tensor(float('inf'))
 best_model = model
 loss_increase_counter = 0
-print_every = 1
+print_every = 6
 case_nr = 14  # 14, 30, 118, 300
 for run in range(n_runs):
     # sample from different grids
