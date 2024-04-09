@@ -66,7 +66,7 @@ def prepare_grid(case_nr, augmentation_nr):
     generators = torch.tensor(gen_data[:, [0, 8, 9, 1, 5, 2]], dtype=torch.float32)
     generators = torch.cat((generators, generators[:, 3].unsqueeze(dim=1)), dim=1)  # add changable Pg and leave original Pg as Pg_set
     # Normalizing the Power P, Q
-    generators[:, [1, 2, 3, 5, 6]] /= baseMV  # TODO: remove 4 (vg) if not working!
+    # generators[:, [1, 2, 3, 5, 6]] /= baseMV  # TODO: remove 4 (vg) if not working!
     return buses, lines, generators
 
 
@@ -156,7 +156,6 @@ def local_power_imbalance(v, theta, buses, lines, gens, pg_k, qg_k, B, L, G):
     # delta_q_start = buses[:, B['qg']] - buses[:, B['Qd']] - buses[:, B['Bs']] * v**2
     delta_q_start = qg_k - buses[:, B['Qd']] - buses[:, B['Bs']] * v ** 2
 
-    # TODO: change delta_p and delta_q computation such that it is a torch.scatter_add_() operation
     src = torch.tensor((lines[:, L['f_bus']]).int() - 1, dtype=torch.int64)
     dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
     y_ij = 1 / torch.sqrt(lines[:, L['r']] ** 2 + lines[:, L['x']] ** 2)
