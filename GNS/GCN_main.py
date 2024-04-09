@@ -54,10 +54,9 @@ def prepare_grid(case_nr, augmentation_nr):
     # buses[:, 4] = buses[:, 3]
     # buses[:, 5] = buses[:, 3]
     baseMV = 100  # set to 100 in GitHub, no default in Matpower
-    buses[:, [4, 5]] /= baseMV  # normalize Gs and Bs to gs and bs by dividing by baseMV
     buses = torch.cat((buses, torch.zeros((buses.shape[0], 1), dtype=torch.float32)), dim=1)  # add qg column for inserting values
-    # Normalizing the Power P, Q and ?S
-    buses[:, [2, 3, 6]] /= baseMV
+    # normalize all P, Q, Gs and Bs to get gs and bs by dividing by baseMV
+    buses[:, [2, 3, 4, 5, 6]] /= baseMV
 
     lines_data = torch.tensor(case_augmented['branch'], dtype=torch.float32)
     lines = torch.tensor(lines_data[:, [0, 1, 2, 3, 4, 8, 9]], dtype=torch.float32)
@@ -67,7 +66,7 @@ def prepare_grid(case_nr, augmentation_nr):
     generators = torch.tensor(gen_data[:, [0, 8, 9, 1, 5, 2]], dtype=torch.float32)
     generators = torch.cat((generators, generators[:, 3].unsqueeze(dim=1)), dim=1)  # add changable Pg and leave original Pg as Pg_set
     # Normalizing the Power P, Q
-    generators[:, [1, 2, 3, 4, 5, 6]] /= baseMV  # TODO: remove 4 (vg) if not working!
+    generators[:, [1, 2, 3, 5, 6]] /= baseMV  # TODO: remove 4 (vg) if not working!
     return buses, lines, generators
 
 
@@ -98,7 +97,8 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     y_ij = 1 / torch.sqrt(lines[:, L['r']] ** 2 + lines[:, L['x']] ** 2)
     # delta_ij refers to v difference between i and j, not the angle difference
     delta_ij = theta[src] - theta[dst]
-    theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
+    # theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
+    theta_shift_ij = lines[:, L['theta']]
     msg = torch.abs(v[src] * v[dst] * y_ij / lines[:, L['tau']] * (torch.sin(theta[src] - theta[dst] - delta_ij - theta_shift_ij) + torch.sin(theta[dst] - theta[src] - delta_ij + theta_shift_ij)) + (v[src] / lines[:, L['tau']] ** 2) * y_ij * torch.sin(delta_ij) + v[dst] ** 2 * y_ij * torch.sin(delta_ij))
     aggregated_neighbor_features = scatter_add(msg, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     p_joule = torch.sum(aggregated_neighbor_features)
@@ -124,7 +124,7 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
 
     # if Pg is larger than Pmax in any value of the same index, this should be impossible!
     rnd_o1 = torch.rand(1)
-    if rnd_o1 < 0.03:
+    if rnd_o1 < 0.09:
         # if torch.any(Pg_new > gens[:, G['Pmax']]):
         print(f'lambda: {lambda_}')
     qg_new_start = buses[:, B['Qd']] - buses[:, B['Bs']] * v ** 2
@@ -132,11 +132,11 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
 
     y_ij = 1 / torch.sqrt(lines[:, L['r']] ** 2 + lines[:, L['x']] ** 2)
-    delta_ij = v[src] - v[dst]
-    theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
+    delta_ij = theta[src] - theta[dst]
+    # theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
+    theta_shift_ij = lines[:, L['theta']]
     msg_from = -v[src] * v[dst] * y_ij[src] / lines[:, L['tau']] * torch.cos(
-        theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij) + (v[src] / lines[:, L['tau']]) ** 2 * (
-                           y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']] / 2)
+        theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij) + (v[src] / lines[:, L['tau']]) ** 2 * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']] / 2)
     msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']] * torch.cos(
         theta[dst] - theta[src] - delta_ij[dst] - theta_shift_ij) + v[dst] ** 2 * (
                          y_ij[dst] * torch.sin(delta_ij[dst]) - lines[:, L['b']] / 2)
@@ -161,8 +161,8 @@ def local_power_imbalance(v, theta, buses, lines, gens, pg_k, qg_k, B, L, G):
     dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
     y_ij = 1 / torch.sqrt(lines[:, L['r']] ** 2 + lines[:, L['x']] ** 2)
     delta_ij = theta[src] - theta[dst]
-    theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
-
+    # theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
+    theta_shift_ij = lines[:, L['theta']]
     p_msg_from = v[src] * v[dst] * y_ij[src] / lines[:, L['tau']] * torch.sin(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij) + (v[src] / lines[:, L['tau']]) ** 2 * y_ij[src] * torch.sin(delta_ij[src])
     p_msg_to = v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']] * torch.sin(theta[dst] - theta[src] - delta_ij[dst] - theta_shift_ij) + v[dst] ** 2 * y_ij[dst] * torch.sin(delta_ij[dst])
 
@@ -233,16 +233,16 @@ class GNS(nn.Module):
         # generators[:, [1, 3, 4, 5, 6]] = (generators[:, [1, 3, 4, 5, 6]] - generators_mean) / generators_std
 
         alpha = 1/self.K  # update rate from networks for next parameters
-        edge_index = torch.tensor(lines[:, :2].t().long(), dtype=torch.long)
-        edge_attr = lines[:, 2:].t()
-        x = buses[:, 1:]
-        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        # edge_index = torch.tensor(lines[:, :2].t().long(), dtype=torch.long)
+        # edge_attr = lines[:, 2:].t()
+        # x = buses[:, 1:]
+        # data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
 
         m = torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32)
         v = torch.ones((buses.shape[0]), dtype=torch.float32)
         theta = torch.zeros((buses.shape[0]), dtype=torch.float32)
         total_loss = 0.
-
+        # TODO: normalize also vg
         v[generators[:, G['bus_i']].long() - 1] = generators[:, G['vg']]
         delta_p = -buses[:, B['Pd']] - buses[:, B['Gs']] * v.pow(2)
         delta_p[generators[:, G['bus_i']].long() - 1] = delta_p[generators[:, G['bus_i']].long() - 1] + generators[:, G['Pg']]
