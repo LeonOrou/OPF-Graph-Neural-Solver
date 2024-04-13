@@ -2,11 +2,11 @@ from pypower.api import case14, case30, case118, case300
 import numpy as np
 import os
 import pickle
-
+import copy
 
 # Load the case300 dataset from pypower.api library
-case = case300()
-case_nr = 300
+case = case14()
+case_nr = 14
 
 # Define the augmentation ranges
 r_range = [0.9, 1.1]
@@ -19,13 +19,13 @@ pg_range = [0.25, 0.75]
 pd_range = [0.5, 1.5]
 qd_range = [0.5, 1.5]
 
-num_augmentations = 10
+num_augmentations = 1000
 # Perform data augmentations
 augmented_data = []
 for _ in range(num_augmentations):
     if len(augmented_data) == 0:
-        augmented_data.append(case.copy()) 
-    augmented_case = case.copy()
+        augmented_data.append(copy.deepcopy(case))
+    augmented_case = copy.deepcopy(case)
     # Perturb r, x, b
     augmented_case['branch'][:, 2] *= np.random.uniform(*r_range, size=augmented_case['branch'].shape[0])
     augmented_case['branch'][:, 3] *= np.random.uniform(*x_range, size=augmented_case['branch'].shape[0])
@@ -49,7 +49,7 @@ for _ in range(num_augmentations):
     augmented_data.append(augmented_case)
 
 # Save augmented grid locally as .pkl file
-augmented_data_dir = f'./data/case{case_nr}'
+augmented_data_dir = f'../data/case{case_nr}'
 os.makedirs(augmented_data_dir, exist_ok=True)
 for i, augmented_case in enumerate(augmented_data):
     with open(f'{augmented_data_dir}/augmented_case{case_nr}_{i}.pkl', 'wb') as f:

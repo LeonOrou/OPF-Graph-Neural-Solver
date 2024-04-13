@@ -38,15 +38,14 @@ B, L, G = get_BLG()
 
 
 def prepare_grid(case_nr, augmentation_nr):
-    case_augmented = pkl.load(open(f'data/case{case_nr}/augmented_case{case_nr}_{augmentation_nr}.pkl', 'rb'))
+    case_augmented = pkl.load(open(f'../data/case{case_nr}/augmented_case{case_nr}_{augmentation_nr}.pkl', 'rb'))
     bus_data = torch.tensor(case_augmented['bus'], dtype=torch.float32)
     lines_data = torch.tensor(case_augmented['branch'], dtype=torch.float32)
     gen_data = torch.tensor(case_augmented['gen'], dtype=torch.float32)
     buses = torch.tensor(bus_data[:, [0, 1, 2, 3, 4, 5]], dtype=torch.float32)
     # Gs and Bs have defaults of 1 in paper, but 0 in matpower
     # Bs is not everywhere 0, but in paper it is everywhere 1 p.u. (of the Qd?)
-    # buses[:, 4] = buses[:, 3]
-    # buses[:, 5] = buses[:, 3]
+    buses[:, [4, 5]] = 1.  # Gs and Bs
     baseMV = case_augmented['baseMVA']  # mostly 100
     buses = torch.cat((buses, torch.zeros((buses.shape[0], 1), dtype=torch.float32)), dim=1)  # add qg column for inserting values
     # normalize all P, Q, Gs and Bs to get gs and bs by dividing by baseMV
@@ -95,10 +94,7 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     aggregated_neighbor_features = scatter_add(msg, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     p_joule = torch.sum(aggregated_neighbor_features)
 
-    pd_sum = torch.sum(buses[:, B['Pd']])
-    gs_sum = torch.sum(buses[:, B['Gs']])
-    # TODO: change p_global computation such that it is a torch.scatter_add_() operation
-    p_global = torch.sum(v.pow(2)) * gs_sum + pd_sum + p_joule
+    p_global = torch.sum(buses[:, B['Pd']]) + torch.sum(v.pow(2) * buses[:, B['Gs']]) + p_joule
 
     if p_global < gens[:, G['Pg_set']].sum():
         lambda_ = (p_global - gens[:, G['Pmin']].sum()) / (2 * (gens[:, G['Pg_set']].sum() - gens[:, G['Pmin']].sum()))
@@ -162,7 +158,7 @@ def local_power_imbalance(v, theta, buses, lines, gens, pg_k, qg_k, B, L, G):
     delta_p = delta_p_start + p_sum_from + p_sum_to
 
     q_msg_from = -v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * torch.cos(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + (v[src] / lines[:, L['tau']][src]) ** 2 * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']][src] / 2)
-    q_msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']][dst] * torch.sin(theta[dst] - theta[src] - delta_ij[dst] - theta_shift_ij[dst]) + v[dst] ** 2 * (y_ij[dst] * torch.cos(delta_ij[dst]) - lines[:, L['b']][dst] / 2)  # last cos is sin in paper??? Shouldnt be true as the complex power is with cos
+    q_msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']][dst] * torch.sin(theta[dst] - theta[src] - delta_ji[dst] - theta_shift_ij[dst]) + v[dst] ** 2 * (y_ij[dst] * torch.cos(delta_ji[dst]) - lines[:, L['b']][dst] / 2)  # last cos is sin in paper??? Shouldnt be true as the complex power is with cos
 
     q_sum_from = scatter_add(q_msg_from, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     q_sum_to = scatter_add(q_msg_to, src, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
@@ -270,8 +266,8 @@ latent_dim = 10  # increase later
 hidden_dim = 10  # increase later
 gamma = 0.9
 K = 10  # correction updates, 30 in paper, less for debugging
-if torch.cuda.is_available():
-    torch.set_default_device('cuda')
+# if torch.cuda.is_available():
+#     torch.set_default_device('cuda')
 model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
 torch.autograd.set_detect_anomaly(True)
 
