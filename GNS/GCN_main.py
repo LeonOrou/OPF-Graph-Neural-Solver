@@ -251,9 +251,9 @@ class GNS(nn.Module):
             # buses = torch.cat((buses[:, :B['qg']], qg_new.unsqueeze(dim=1), buses[:, B['qg'] + 1:]), dim=1)
             delta_p, delta_q = local_power_imbalance(v, theta, buses, lines, generators, Pg_new, qg_new, B, L, G)
             rng_o1 = torch.rand(1)
-            if rng_o1 < self.K/50 and k==K-1:
-                print(f'delta_p: {delta_p.data}')
-                print(f'delta_q: {delta_q.data}')
+            if rng_o1 < self.K/100 and k==K-1:
+                print(f'delta_p: {delta_p.data[:7]}')
+                print(f'delta_q: {delta_q.data[:7]}')
             total_loss = total_loss + self.gamma**(self.K - k) * torch.sum(delta_p.pow(2) + delta_q.pow(2)) / buses.shape[0]
         return v, theta, total_loss
 
@@ -265,7 +265,7 @@ class GNS(nn.Module):
 latent_dim = 10  # increase later
 hidden_dim = 10  # increase later
 gamma = 0.9
-K = 10  # correction updates, 30 in paper, less for debugging
+K = 15  # correction updates, 30 in paper, less for debugging
 # if torch.cuda.is_available():
 #     torch.set_default_device('cuda')
 model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
@@ -291,6 +291,7 @@ for run in range(n_runs):
         v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
         losses.append(loss)
     total_loss = sum(losses) / batch_size
+
     total_loss.backward()
 
     optimizer.step()
