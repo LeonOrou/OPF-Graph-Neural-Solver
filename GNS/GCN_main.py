@@ -193,7 +193,7 @@ class GNS(nn.Module):
         self.K = K
 
     def forward(self, buses, lines, generators, B, L, G):
-        alpha = 1/1000  # update rate from networks for next parameters
+        alpha = 1  # update rate from networks for next parameters
         # edge_index = torch.tensor(lines[:, :2].t().long(), dtype=torch.long)
         # edge_attr = lines[:, 2:].t()
         # x = buses[:, 1:]
@@ -279,31 +279,35 @@ best_model = model
 loss_increase_counter = 0
 print_every = 3
 case_nr = 14  # 14, 30, 118, 300
+batch_size = 8
 for run in range(n_runs):
     model.train()
     augmentation_nr = random.randint(1, 1000)  # random augmentation of the 10
+    random_batch_indices = random.sample(range(1, 1001), batch_size)
     # augmentation_nr = 1  # 0 is not modified case
-    buses, lines, generators = prepare_grid(case_nr, augmentation_nr)
-
-    v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
-
-    loss.backward()
+    losses = []
+    for i in random_batch_indices:
+        buses, lines, generators = prepare_grid(case_nr, augmentation_nr)
+        v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
+        losses.append(loss)
+    total_loss = sum(losses) / batch_size
+    total_loss.backward()
 
     optimizer.step()
     optimizer.zero_grad()
 
-    if loss >= best_loss:
+    if total_loss >= best_loss:
         loss_increase_counter += 1
         if loss_increase_counter > 100:
             print('Loss is increasing')
             break
     else:
-        best_loss = loss.data
+        best_loss = total_loss.data
         best_model = model
         loss_increase_counter = 0
         torch.save(best_model.state_dict(), f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}.pth')
     if run % print_every == 0:
-        print(f'Run: {run}, Loss: {loss}, best loss: {best_loss}')
+        print(f'Run: {run}, Loss: {total_loss}, best loss: {best_loss}')
 
 
 
