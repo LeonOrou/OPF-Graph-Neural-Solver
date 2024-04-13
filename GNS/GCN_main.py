@@ -90,7 +90,7 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     delta_ij = theta[src] - theta[dst]
     # theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
     theta_shift_ij = lines[:, L['theta']]
-    msg = torch.abs(v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * (torch.sin(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij) + torch.sin(theta[dst] - theta[src] - delta_ij[src] + theta_shift_ij[src])) + (v[src] / lines[:, L['tau']][src] ** 2) * y_ij[src] * torch.sin(delta_ij[src]) + v[dst] ** 2 * y_ij[src] * torch.sin(delta_ij[src]))
+    msg = torch.abs(v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * (torch.sin(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + torch.sin(theta[dst] - theta[src] - delta_ij[src] + theta_shift_ij[src])) + (v[src] / lines[:, L['tau']][src] ** 2) * y_ij[src] * torch.sin(delta_ij[src]) + v[dst] ** 2 * y_ij[src] * torch.sin(delta_ij[src]))
     aggregated_neighbor_features = scatter_add(msg, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     p_joule = torch.sum(aggregated_neighbor_features)
 
@@ -123,7 +123,7 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     # theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
     theta_shift_ij = lines[:, L['theta']]
     msg_from = -v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * torch.cos(
-        theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + (v[src] / lines[:, L['tau']]) ** 2 * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']][src] / 2)
+        theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + (v[src] / lines[:, L['tau']][src]) ** 2 * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']][src] / 2)
     msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']][dst] * torch.cos(
         theta[dst] - theta[src] - delta_ji[dst] - theta_shift_ij[dst]) + v[dst] ** 2 * (
                          y_ij[dst] * torch.sin(delta_ji[dst]) - lines[:, L['b']][dst] / 2)
@@ -193,7 +193,7 @@ class GNS(nn.Module):
         self.K = K
 
     def forward(self, buses, lines, generators, B, L, G):
-        alpha = 1/100  # update rate from networks for next parameters
+        alpha = 1/1000  # update rate from networks for next parameters
         # edge_index = torch.tensor(lines[:, :2].t().long(), dtype=torch.long)
         # edge_attr = lines[:, 2:].t()
         # x = buses[:, 1:]
