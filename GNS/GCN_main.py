@@ -7,6 +7,7 @@ import pickle as pkl
 from torch_geometric.data import Data
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops, degree
+from utils import get_BLG, load_all_grids
 # import wandb
 
 
@@ -22,54 +23,8 @@ from torch_geometric.utils import add_self_loops, degree
 
 ## case format: https://rwl.github.io/PYPOWER/api/pypower.caseformat-module.html
 
-def get_BLG():
-    B = {'bus_i': 0, 'type': 1, 'Pd': 2, 'Qd': 3, 'Gs': 4, 'Bs': 5, 'qg': 6}  # indices of bus data
-
-    L = {'f_bus': 0, 't_bus': 1, 'r': 2, 'x': 3, 'b': 4, 'tau': 5, 'theta': 6}  # indices of branch data
-
-    G = {'bus_i': 0, 'Pmax': 1, 'Pmin': 2, 'Pg_set': 3, 'vg': 4, 'qg': 5, 'Pg': 6}  # indices of generator data
-
-    # costs = torch.tensor(cost_data, dtype=torch.float32)  # needed?
-    # cost format: model, startup cost, shutdown cost, nr coefficients, cost coefficients
-    return B, L, G
-
-
 B, L, G = get_BLG()
 
-
-def prepare_grid(case_nr, augmentation_nr):
-    case_augmented = pkl.load(open(f'../data/case{case_nr}/augmented_case{case_nr}_{augmentation_nr}.pkl', 'rb'))
-    bus_data = torch.tensor(case_augmented['bus'], dtype=torch.float32)
-    lines_data = torch.tensor(case_augmented['branch'], dtype=torch.float32)
-    gen_data = torch.tensor(case_augmented['gen'], dtype=torch.float32)
-    buses = torch.tensor(bus_data[:, [0, 1, 2, 3, 4, 5]], dtype=torch.float32)
-    # Gs and Bs have defaults of 1 in paper, but 0 in matpower
-    # Bs is not everywhere 0, but in paper it is everywhere 1 p.u. (of the Qd?)
-    buses[:, [4, 5]] = 1.  # Gs and Bs
-    baseMV = case_augmented['baseMVA']  # mostly 100
-    buses = torch.cat((buses, torch.zeros((buses.shape[0], 1), dtype=torch.float32)), dim=1)  # add qg column for inserting values
-    # normalize all P, Q, Gs and Bs to get gs and bs by dividing by baseMV
-    buses[:, [2, 3, 4, 5, 6]] /= baseMV
-
-    lines = torch.tensor(lines_data[:, [0, 1, 2, 3, 4, 8, 9]], dtype=torch.float32)
-    lines[:, L['tau']] = torch.where(lines[:, L['tau']] == 0, 1, lines[:, L['tau']])
-
-    generators = torch.tensor(gen_data[:, [0, 8, 9, 1, 5, 2]], dtype=torch.float32)
-    generators = torch.cat((generators, generators[:, 3].unsqueeze(dim=1)), dim=1)  # copy Pg and concat changable Pg and leave original Pg as Pg_set
-    # Normalizing the Power P, Q
-    generators[:, [1, 2, 3, 5, 6]] /= baseMV
-    return buses, lines, generators
-
-def load_all_grids(case_nr, samples=100):
-    all_buses = []
-    all_lines = []
-    all_generators = []
-    for i in range(1, samples+1):  # i==0 is not augmented case, exclude
-        buses, lines, generators = prepare_grid(case_nr, i)
-        all_buses.append(buses)
-        all_lines.append(lines)
-        all_generators.append(generators)
-    return all_buses, all_lines, all_generators
 
 class LearningBlock(nn.Module):  # later change hidden dim to more dims, currently suggested latent=hidden
     def __init__(self, dim_in, hidden_dim, dim_out):
@@ -122,7 +77,7 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
 
     # if Pg is larger than Pmax in any value of the same index, this should be impossible!
     rnd_o1 = torch.rand(1)
-    if rnd_o1 < 0.005:
+    if rnd_o1 < 0.001:
         # if torch.any(Pg_new > gens[:, G['Pmax']]):
         print(f'lambda: {lambda_}')
     qg_new_start = buses[:, B['Qd']] - buses[:, B['Bs']] * v ** 2
@@ -190,13 +145,13 @@ class GNS(nn.Module):
         self.L_m = nn.ModuleDict()
 
         for k in range(K):
-            self.phi_from[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
+            self.phi_from[str(k)] = LearningBlock(5+ latent_dim, hidden_dim, 1)
             # self.phi_to[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
             # self.phi_loop[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
 
-            self.L_theta[str(k)] = LearningBlock(dim_in=4 + 2 * latent_dim, hidden_dim=hidden_dim, dim_out=1)
-            self.L_v[str(k)] = LearningBlock(dim_in=4 + 2 * latent_dim, hidden_dim=hidden_dim, dim_out=1)
-            self.L_m[str(k)] = LearningBlock(dim_in=4 + 2 * latent_dim, hidden_dim=hidden_dim, dim_out=latent_dim)
+            self.L_theta[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=1)
+            self.L_v[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=1)
+            self.L_m[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=latent_dim)
 
         self.latent_dim = latent_dim
         self.gamma = gamma
@@ -238,7 +193,7 @@ class GNS(nn.Module):
             # phi_loop_input = torch.cat((m[dst], lines[:, 2:]), dim=1)
             # ?only "phi_from" because we collect information only "from" neighbors
             phi_from_input = self.phi_from[str(k)](phi_from_input)
-            phi_from_sum = scatter_add(phi_from_input, src, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
+            phi_from_sum = scatter_add(phi_from_input, dst, out=torch.zeros((buses.shape[0], 1), dtype=torch.float32), dim=0)
             # phi_to_sum = scatter_add(phi_res_v, dst, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
             # phi_loop_sum = scatter_add(phi_res_m, dst, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
 
@@ -270,65 +225,69 @@ class GNS(nn.Module):
 # Weights and Biases package
 # wandb.login()
 
+if __name__ == '__main__':
+    # initialization
+    latent_dim = 10  # increase later
+    hidden_dim = 10  # increase later
+    gamma = 0.9
+    K = 10  # correction updates, 30 in paper, less for debugging
+    if torch.cuda.is_available():
+        torch.set_default_device('cuda')
+    model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
+    torch.autograd.set_detect_anomaly(True)
 
-# initialization
-latent_dim = 10  # increase later
-hidden_dim = 10  # increase later
-gamma = 0.9
-K = 10  # correction updates, 30 in paper, less for debugging
-if torch.cuda.is_available():
-    torch.set_default_device('cuda')
-model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
-torch.autograd.set_detect_anomaly(True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    n_runs = 10 ** 6  # 10**6 used in paper
+    best_loss = torch.tensor(float('inf'))
+    best_model = model
+    loss_increase_counter = 0
+    case_nr = 14  # 14, 30, 118, 300
+    batch_size = 5
+    print_every = 3
 
-n_runs = 10 ** 6  # 10**6 used in paper
-best_loss = torch.tensor(float('inf'))
-best_model = model
-loss_increase_counter = 0
-print_every = 3
-case_nr = 14  # 14, 30, 118, 300
-batch_size = 5
+    nr_samples = 20
+    all_buses, all_lines, all_generators = load_all_grids(case_nr, nr_samples=nr_samples)
 
-sample_size = 200
-all_buses, all_lines, all_generators = load_all_grids(case_nr, samples=sample_size)
-
-for run in range(n_runs):
-    model.train()
-    # loop through all batches in one run
-    # augmentation_nr = random.randint(1, 1000)  # random augmentation of the 10
-    batch_loader = [[i for i in range(j * batch_size, j * batch_size + batch_size)] for j in range(torch.ceil(torch.tensor(sample_size/batch_size)).int())]
-    # augmentation_nr = 1  # 0 is not modified case
-    run_losses = []
-    for batch in batch_loader:
+    for run in range(n_runs):
+        model.train()
+        # loop through all batches in one run
+        # augmentation_nr = random.randint(1, 1000)  # random augmentation of the 10
+        # batch_loader = [[i for i in range(j * batch_size, j * batch_size + batch_size)] for j in range(torch.ceil(torch.tensor(nr_samples/batch_size)).int())]
+        # # augmentation_nr = 1  # 0 is not modified case
+        # run_losses = []
+        # for batch in batch_loader:
+        #     losses = []
+        #     for grid_i in batch:
+        #         buses, lines, generators = all_buses[grid_i], all_lines[grid_i], all_generators[grid_i]
+        #         v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
+        #         losses.append(loss)
         losses = []
-        for grid_i in batch:
+        for grid_i in range(nr_samples):
             buses, lines, generators = all_buses[grid_i], all_lines[grid_i], all_generators[grid_i]
             v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
             losses.append(loss)
-
-        total_loss = sum(losses) / batch_size
-
+        # total_loss = sum(losses) / batch_size
+        total_loss = sum(losses) / len(losses)
         total_loss.backward()
 
         optimizer.step()
         optimizer.zero_grad()
-        run_losses.append(total_loss.data)
+        # run_losses.append(total_loss.data)
 
-    run_loss = sum(run_losses) / len(run_losses)
-    if run_loss >= best_loss:
-        loss_increase_counter += 1
-        if loss_increase_counter > 100:
-            print('Loss is increasing')
-            break
-    else:
-        best_loss = run_loss
-        best_model = model
-        loss_increase_counter = 0
-        torch.save(best_model.state_dict(), f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_B{batch_size}.pth')
-    if run % print_every == 0:
-        print(f'Run: {run}, Loss: {run_loss}, best loss: {best_loss}')
+        # run_loss = sum(total_loss) / n_runs
+        if total_loss >= best_loss:
+            loss_increase_counter += 1
+            if loss_increase_counter > 100:
+                print('Loss is increasing')
+                break
+        else:
+            best_loss = total_loss
+            best_model = model
+            loss_increase_counter = 0
+            torch.save(best_model.state_dict(), f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_B{batch_size}.pth')
+        if run % print_every == 0:
+            print(f'Run: {run}, Loss: {total_loss}, best loss: {best_loss}')
 
 
 
