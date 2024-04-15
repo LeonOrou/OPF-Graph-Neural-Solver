@@ -55,7 +55,7 @@ latent_dim = 10
 hidden_dim = 10
 batch_size = 5
 model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
-model.load_state_dict(torch.load(f'../models/best_model_c14_K10_L10_H10_B5_L5.pth'))
+model.load_state_dict(torch.load(f'../models/best_model_c14_K10_L10_H10.pth'))
 B, L, G = get_BLG()
 GNS_duration_times = np.zeros(nr_eval_samples, dtype=np.float32)
 GNS_theta_out = np.zeros((nr_eval_samples, case_nr), dtype=np.float32)

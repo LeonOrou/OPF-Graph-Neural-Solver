@@ -8,6 +8,7 @@ from torch_geometric.data import Data
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops, degree
 from utils import get_BLG, load_all_grids
+from torch.profiler import profile, record_function, ProfilerActivity
 # import wandb
 
 
@@ -42,12 +43,12 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     src = torch.tensor((lines[:, L['f_bus']]).int() - 1, dtype=torch.int64)
     dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
 
-    y_ij = 1 / torch.sqrt(lines[:, L['r']] ** 2 + lines[:, L['x']] ** 2)
+    y_ij = 1 / torch.sqrt(lines[:, L['r']].pow(2) + lines[:, L['x']].pow(2))
     # delta_ij refers to v difference between i and j, not the angle difference
     delta_ij = theta[src] - theta[dst]
     # theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
     theta_shift_ij = lines[:, L['theta']]
-    msg = torch.abs(v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * (torch.sin(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + torch.sin(theta[dst] - theta[src] - delta_ij[src] + theta_shift_ij[src])) + (v[src] / lines[:, L['tau']][src] ** 2) * y_ij[src] * torch.sin(delta_ij[src]) + v[dst] ** 2 * y_ij[src] * torch.sin(delta_ij[src]))
+    msg = torch.abs(v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * (torch.sin(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + torch.sin(theta[dst] - theta[src] - delta_ij[src] + theta_shift_ij[src])) + (v[src] / lines[:, L['tau']][src].pow(2)) * y_ij[src] * torch.sin(delta_ij[src]) + v[dst].pow(2) * y_ij[src] * torch.sin(delta_ij[src]))
     aggregated_neighbor_features = scatter_add(msg, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     p_joule = torch.sum(aggregated_neighbor_features)
 
@@ -58,8 +59,6 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     else:
         lambda_ = (p_global - 2 * gens[:, G['Pg_set']].sum() + gens[:, G['Pmax']].sum()) / (
                 2 * (gens[:, G['Pmax']].sum() - gens[:, G['Pg_set']].sum()))
-    # if lambda_ > 1:
-    #     lambda_ = 1
 
     if lambda_ < 0.5:  # equasion (21) in paper
         Pg_new = gens[:, G['Pmin']] + 2 * (gens[:, G['Pg_set']] - gens[:, G['Pmin']]) * lambda_
@@ -72,7 +71,7 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     if rnd_o1 < 0.001:
         # if torch.any(Pg_new > gens[:, G['Pmax']]):
         print(f'lambda: {lambda_}')
-    qg_new_start = buses[:, B['Qd']] - buses[:, B['Bs']] * v ** 2
+    qg_new_start = buses[:, B['Qd']] - buses[:, B['Bs']] * v.pow(2)
     src = torch.tensor((lines[:, L['f_bus']]).int() - 1, dtype=torch.int64)
     dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
 
@@ -80,9 +79,9 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     # theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
     theta_shift_ij = lines[:, L['theta']]
     msg_from = -v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * torch.cos(
-        theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + (v[src] / lines[:, L['tau']][src]) ** 2 * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']][src] / 2)
+        theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + (v[src] / lines[:, L['tau']][src]).pow(2) * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']][src] / 2)
     msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']][dst] * torch.cos(
-        theta[dst] - theta[src] - delta_ji[dst] - theta_shift_ij[dst]) + v[dst] ** 2 * (
+        theta[dst] - theta[src] - delta_ji[dst] - theta_shift_ij[dst]) + v[dst].pow(2) * (
                          y_ij[dst] * torch.sin(delta_ji[dst]) - lines[:, L['b']][dst] / 2)
 
     aggr_from = scatter_add(msg_from, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
@@ -92,26 +91,26 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     return Pg_new, qg_new
 
 def local_power_imbalance(v, theta, buses, lines, gens, pg_k, qg_k, B, L, G):
-    delta_p_gens = scatter_add(pg_k, torch.tensor(generators[:, G['bus_i']] - 1, dtype=torch.int64), out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
-    delta_p_start = delta_p_gens - buses[:, B['Pd']] - buses[:, B['Gs']] * v ** 2
-    delta_q_start = qg_k - buses[:, B['Qd']] + buses[:, B['Bs']] * v ** 2
+    delta_p_gens = scatter_add(pg_k, torch.tensor(gens[:, G['bus_i']] - 1, dtype=torch.int64), out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
+    delta_p_start = delta_p_gens - buses[:, B['Pd']] - buses[:, B['Gs']] * v.pow(2)
+    delta_q_start = qg_k - buses[:, B['Qd']] + buses[:, B['Bs']] * v.pow(2)
 
     src = torch.tensor((lines[:, L['f_bus']]).int() - 1, dtype=torch.int64)
     dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
-    y_ij = 1 / torch.sqrt(lines[:, L['r']] ** 2 + lines[:, L['x']] ** 2)
+    y_ij = 1 / torch.sqrt(lines[:, L['r']].pow(2) + lines[:, L['x']].pow(2))
     delta_ij = theta[src] - theta[dst]
     delta_ji = theta[dst] - theta[src]
     # theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
     theta_shift_ij = lines[:, L['theta']]
-    p_msg_from = v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * torch.sin(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + (v[src] / lines[:, L['tau']][src]) ** 2 * y_ij[src] * torch.sin(delta_ij[src])
-    p_msg_to = v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']][dst] * torch.sin(theta[dst] - theta[src] - delta_ji[dst] - theta_shift_ij[dst]) + v[dst] ** 2 * y_ij[dst] * torch.sin(delta_ji[dst])
+    p_msg_from = v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * torch.sin(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + (v[src] / lines[:, L['tau']][src]).pow(2) * y_ij[src] * torch.sin(delta_ij[src])
+    p_msg_to = v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']][dst] * torch.sin(theta[dst] - theta[src] - delta_ji[dst] - theta_shift_ij[dst]) + v[dst].pow(2) * y_ij[dst] * torch.sin(delta_ji[dst])
 
     p_sum_from = scatter_add(p_msg_from, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     p_sum_to = scatter_add(p_msg_to, src, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     delta_p = delta_p_start + p_sum_from + p_sum_to
 
-    q_msg_from = -v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * torch.cos(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + (v[src] / lines[:, L['tau']][src]) ** 2 * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']][src] / 2)
-    q_msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']][dst] * torch.cos(theta[dst] - theta[src] - delta_ji[dst] - theta_shift_ij[dst]) + v[dst] ** 2 * (y_ij[dst] * torch.sin(delta_ji[dst]) - lines[:, L['b']][dst] / 2)  # last cos is sin in paper??? Shouldnt be true as the complex power is with cos
+    q_msg_from = -v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * torch.cos(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + (v[src] / lines[:, L['tau']][src]).pow(2) * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']][src] / 2)
+    q_msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']][dst] * torch.cos(theta[dst] - theta[src] - delta_ji[dst] - theta_shift_ij[dst]) + v[dst].pow(2) * (y_ij[dst] * torch.sin(delta_ji[dst]) - lines[:, L['b']][dst] / 2)  # last cos is sin in paper??? Shouldnt be true as the complex power is with cos
 
     q_sum_from = scatter_add(q_msg_from, dst, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
     q_sum_to = scatter_add(q_msg_to, src, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
@@ -146,7 +145,6 @@ class GNS(nn.Module):
         self.K = K
 
     def forward(self, buses, lines, generators, B, L, G):
-        alpha = 1  # update rate from networks for next parameters
         # edge_index = torch.tensor(lines[:, :2].t().long(), dtype=torch.long)
         # edge_attr = lines[:, 2:].t()
         # x = buses[:, 1:]
@@ -160,9 +158,9 @@ class GNS(nn.Module):
         bus_i = torch.tensor(generators[:, G['bus_i']] - 1, dtype=torch.int64)
         v[generators[:, G['bus_i']].long() - 1] = generators[:, G['vg']]
         pg_new = scatter_add(generators[:, G['Pg']], bus_i, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
-        delta_p = pg_new - buses[:, B['Pd']] - buses[:, B['Gs']] * v ** 2
+        delta_p = pg_new - buses[:, B['Pd']] - buses[:, B['Gs']] * v.pow(2)
         qg_new = scatter_add(generators[:, G['qg']], bus_i, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
-        delta_q = qg_new - buses[:, B['Qd']] + buses[:, B['Bs']] * v ** 2
+        delta_q = qg_new - buses[:, B['Qd']] + buses[:, B['Bs']] * v.pow(2)
         # num_nodes = 100
         # num_edges = 1000
         # in_dim = 32
@@ -191,29 +189,30 @@ class GNS(nn.Module):
             network_input = torch.cat((v.unsqueeze(1), theta.unsqueeze(1), delta_p.unsqueeze(1), delta_q.unsqueeze(1), m, phi_from_sum), dim=1)
 
             theta_update = self.L_theta[str(k)](network_input)
-            theta = theta + theta_update.squeeze() * alpha
+            theta = theta + theta_update.squeeze()
 
             v_update = self.L_v[str(k)](network_input)
             non_gens_mask = torch.ones_like(v, dtype=torch.bool)
             non_gens_mask[generators[:, G['bus_i']].long() - 1] = False
-            v = torch.where(non_gens_mask, v + v_update.squeeze() * alpha, v)
+            v = torch.where(non_gens_mask, v + v_update.squeeze(), v)
 
             m_update = self.L_m[str(k)](network_input)
-            m = m + m_update * alpha
+            m = m + m_update
 
             Pg_new, qg_new = global_active_compensation(v, theta, buses, lines, generators, B, L, G)
 
             delta_p, delta_q = local_power_imbalance(v, theta, buses, lines, generators, Pg_new, qg_new, B, L, G)
 
             rng_o1 = torch.rand(1)
-            if rng_o1 < self.K/500 and k == self.K-1:
+            if rng_o1 < self.K/3000 and k == self.K-1:
                 print(f'delta_p: {delta_p.data[:7]}')
                 print(f'delta_q: {delta_q.data[:7]}')
-            total_loss = total_loss + self.gamma**(self.K - k) * torch.sum(delta_p.pow(2) + delta_q.pow(2)) / buses.shape[0]
+            total_loss = total_loss + self.gamma**(self.K - k) * torch.sum(delta_p.pow(2) + delta_q.pow(2)).div(buses.shape[0])
         return v, theta, total_loss
 
 
 if __name__ == '__main__':
+
     # Weights and Biases package
     # wandb.login()
 
@@ -223,63 +222,56 @@ if __name__ == '__main__':
     gamma = 0.9
     K = 10  # correction updates, 30 in paper, less for debugging
 
+    model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
+
+    ## comment CUDA code below for CPU usage
     # if torch.cuda.is_available():
     #     torch.set_default_device('cuda')
+    # model.to(torch.device('cuda'))
 
-    model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
     best_model = model
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-    n_runs = 10 ** 6  # 10**6 used in paper
+    n_runs = 10  # 10.pow(6) used in paper
     best_loss = torch.tensor(float('inf'))
     loss_increase_counter = 0
     case_nr = 14  # 14, 30, 118, 300
-    batch_size = 5
+    # batch_size = 5
     print_every = 1
-    nr_samples = 500
+    nr_samples = 10
+    with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+        with record_function("model_inference"):
+            all_buses, all_lines, all_generators = load_all_grids(case_nr, nr_samples=nr_samples)
 
-    all_buses, all_lines, all_generators = load_all_grids(case_nr, nr_samples=nr_samples)
+            for run in range(n_runs):
+                model.train()
+                losses = torch.zeros(nr_samples, dtype=torch.float64)
+                for i in range(nr_samples):
+                    buses, lines, generators = all_buses[i], all_lines[i], all_generators[i]
+                    v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
+                    losses[i] = loss
 
-    for run in range(n_runs):
-        model.train()
-        batch_loader = [[i for i in range(j * batch_size, j * batch_size + batch_size)] for j in range(torch.ceil(torch.tensor(nr_samples/batch_size)).int())]
+                total_loss = torch.mean(losses)
+                # print(f'Run: {run}, Loss: {total_loss}')
+                total_loss.backward()
 
-        ### update after each batch, indent optimizer.step() and optimizer.zero_grad()
-        # run_losses = []
-        # for batch in batch_loader:
-        #     losses = []
-        #     for grid_i in batch:
-        #         buses, lines, generators = all_buses[grid_i], all_lines[grid_i], all_generators[grid_i]
-        #         v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
-        #         losses.append(loss)
+                optimizer.step()
+                optimizer.zero_grad()
 
-        ### looping through all samples for update
-        losses = []
-        for grid_i in range(nr_samples):
-            buses, lines, generators = all_buses[grid_i], all_lines[grid_i], all_generators[grid_i]
-            v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
-            losses.append(loss)
+                if total_loss >= best_loss:
+                    loss_increase_counter += 1
+                    if loss_increase_counter > 100:
+                        print('Loss is increasing')
+                        break
+                else:
+                    best_loss = total_loss
+                    best_model = model
+                    loss_increase_counter = 0
+                    torch.save(best_model.state_dict(), f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}.pth')
+                if run % print_every == 0:
+                    print(f'Run: {run}, Loss: {total_loss}, best loss: {best_loss}')
 
-        total_loss = sum(losses) / len(losses)
-        # print(f'Run: {run}, Loss: {total_loss}')
-        total_loss.backward()
-
-        optimizer.step()
-        optimizer.zero_grad()
-
-        if total_loss >= best_loss:
-            loss_increase_counter += 1
-            if loss_increase_counter > 100:
-                print('Loss is increasing')
-                break
-        else:
-            best_loss = total_loss
-            best_model = model
-            loss_increase_counter = 0
-            torch.save(best_model.state_dict(), f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_B{batch_size}.pth')
-        if run % print_every == 0:
-            print(f'Run: {run}, Loss: {total_loss}, best loss: {best_loss}')
-
+    print(prof.key_averages(group_by_input_shape=True).table(sort_by="cpu_time_total", row_limit=10))
 
 
