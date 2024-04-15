@@ -60,6 +60,16 @@ def prepare_grid(case_nr, augmentation_nr):
     generators[:, [1, 2, 3, 5, 6]] /= baseMV
     return buses, lines, generators
 
+def load_all_grids(case_nr, samples=100):
+    all_buses = []
+    all_lines = []
+    all_generators = []
+    for i in range(1, samples+1):  # i==0 is not augmented case, exclude
+        buses, lines, generators = prepare_grid(case_nr, i)
+        all_buses.append(buses)
+        all_lines.append(lines)
+        all_generators.append(generators)
+    return all_buses, all_lines, all_generators
 
 class LearningBlock(nn.Module):  # later change hidden dim to more dims, currently suggested latent=hidden
     def __init__(self, dim_in, hidden_dim, dim_out):
@@ -112,7 +122,7 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
 
     # if Pg is larger than Pmax in any value of the same index, this should be impossible!
     rnd_o1 = torch.rand(1)
-    if rnd_o1 < 0.02:
+    if rnd_o1 < 0.005:
         # if torch.any(Pg_new > gens[:, G['Pmax']]):
         print(f'lambda: {lambda_}')
     qg_new_start = buses[:, B['Qd']] - buses[:, B['Bs']] * v ** 2
@@ -265,9 +275,9 @@ class GNS(nn.Module):
 latent_dim = 10  # increase later
 hidden_dim = 10  # increase later
 gamma = 0.9
-K = 15  # correction updates, 30 in paper, less for debugging
-# if torch.cuda.is_available():
-#     torch.set_default_device('cuda')
+K = 10  # correction updates, 30 in paper, less for debugging
+if torch.cuda.is_available():
+    torch.set_default_device('cuda')
 model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
 torch.autograd.set_detect_anomaly(True)
 
@@ -279,36 +289,46 @@ best_model = model
 loss_increase_counter = 0
 print_every = 3
 case_nr = 14  # 14, 30, 118, 300
-batch_size = 8
+batch_size = 5
+
+sample_size = 200
+all_buses, all_lines, all_generators = load_all_grids(case_nr, samples=sample_size)
+
 for run in range(n_runs):
     model.train()
-    augmentation_nr = random.randint(1, 1000)  # random augmentation of the 10
-    random_batch_indices = random.sample(range(1, 1001), batch_size)
+    # loop through all batches in one run
+    # augmentation_nr = random.randint(1, 1000)  # random augmentation of the 10
+    batch_loader = [[i for i in range(j * batch_size, j * batch_size + batch_size)] for j in range(torch.ceil(torch.tensor(sample_size/batch_size)).int())]
     # augmentation_nr = 1  # 0 is not modified case
-    losses = []
-    for i in random_batch_indices:
-        buses, lines, generators = prepare_grid(case_nr, augmentation_nr)
-        v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
-        losses.append(loss)
-    total_loss = sum(losses) / batch_size
+    run_losses = []
+    for batch in batch_loader:
+        losses = []
+        for grid_i in batch:
+            buses, lines, generators = all_buses[grid_i], all_lines[grid_i], all_generators[grid_i]
+            v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
+            losses.append(loss)
 
-    total_loss.backward()
+        total_loss = sum(losses) / batch_size
 
-    optimizer.step()
-    optimizer.zero_grad()
+        total_loss.backward()
 
-    if total_loss >= best_loss:
+        optimizer.step()
+        optimizer.zero_grad()
+        run_losses.append(total_loss.data)
+
+    run_loss = sum(run_losses) / len(run_losses)
+    if run_loss >= best_loss:
         loss_increase_counter += 1
         if loss_increase_counter > 100:
             print('Loss is increasing')
             break
     else:
-        best_loss = total_loss.data
+        best_loss = run_loss
         best_model = model
         loss_increase_counter = 0
-        torch.save(best_model.state_dict(), f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}.pth')
+        torch.save(best_model.state_dict(), f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_B{batch_size}.pth')
     if run % print_every == 0:
-        print(f'Run: {run}, Loss: {total_loss}, best loss: {best_loss}')
+        print(f'Run: {run}, Loss: {run_loss}, best loss: {best_loss}')
 
 
 
