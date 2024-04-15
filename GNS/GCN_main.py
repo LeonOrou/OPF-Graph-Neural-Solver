@@ -13,14 +13,6 @@ from utils import get_BLG, load_all_grids
 
 # paper for this whole project, very careful reading: https://pscc-central.epfl.ch/repo/papers/2020/715.pdf
 # documentation of data formats for pypower, very careful reading: https://rwl.github.io/PYPOWER/api/pypower.caseformat-module.html
-
-# ppopt = ppoption(PF_ALG=1)
-# r = runpf(pf_net_pyp, ppopt)
-# printpf(r)
-
-# num_nodes = bus_data.shape[0]
-# num_edges = branch_data.shape[0]
-
 ## case format: https://rwl.github.io/PYPOWER/api/pypower.caseformat-module.html
 
 B, L, G = get_BLG()
@@ -100,13 +92,9 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     return Pg_new, qg_new
 
 def local_power_imbalance(v, theta, buses, lines, gens, pg_k, qg_k, B, L, G):
-    delta_p_base = -buses[:, B['Pd']] - buses[:, B['Gs']] * v ** 2
-    # delta_p_gens = [gens[:, G['Pg']][gens[:, G['bus_i']].int() - 1 == i] if i in gens[:, G['bus_i']].int() - 1 else 0. for i in range(buses.shape[0])]
-    delta_p_gens = [pg_k[gens[:, G['bus_i']].int() - 1 == i] if i in gens[:, G['bus_i']].int() - 1 else 0.
-                    for i in range(buses.shape[0])]
-    delta_p_start = delta_p_base + torch.tensor(delta_p_gens)
-    # delta_q_start = buses[:, B['qg']] - buses[:, B['Qd']] - buses[:, B['Bs']] * v**2
-    delta_q_start = qg_k - buses[:, B['Qd']] - buses[:, B['Bs']] * v ** 2
+    delta_p_gens = scatter_add(pg_k, torch.tensor(generators[:, G['bus_i']] - 1, dtype=torch.int64), out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
+    delta_p_start = delta_p_gens - buses[:, B['Pd']] - buses[:, B['Gs']] * v ** 2
+    delta_q_start = qg_k - buses[:, B['Qd']] + buses[:, B['Bs']] * v ** 2
 
     src = torch.tensor((lines[:, L['f_bus']]).int() - 1, dtype=torch.int64)
     dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
@@ -145,7 +133,7 @@ class GNS(nn.Module):
         self.L_m = nn.ModuleDict()
 
         for k in range(K):
-            self.phi_from[str(k)] = LearningBlock(5+ latent_dim, hidden_dim, 1)
+            self.phi_from[str(k)] = LearningBlock(5 + latent_dim, hidden_dim, 1)
             # self.phi_to[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
             # self.phi_loop[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
 
@@ -168,10 +156,13 @@ class GNS(nn.Module):
         v = torch.ones((buses.shape[0]), dtype=torch.float32)
         theta = torch.zeros((buses.shape[0]), dtype=torch.float32)
         total_loss = 0.
+        # make dtype=int64 for scatter_add
+        bus_i = torch.tensor(generators[:, G['bus_i']] - 1, dtype=torch.int64)
         v[generators[:, G['bus_i']].long() - 1] = generators[:, G['vg']]
-        delta_p = -buses[:, B['Pd']] - buses[:, B['Gs']] * v.pow(2)
-        delta_p[generators[:, G['bus_i']].long() - 1] = delta_p[generators[:, G['bus_i']].long() - 1] + generators[:, G['Pg']]
-        delta_q = buses[:, B['qg']] - buses[:, B['Qd']] - buses[:, B['Bs']] * v.pow(2)
+        pg_new = scatter_add(generators[:, G['Pg']], bus_i, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
+        delta_p = pg_new - buses[:, B['Pd']] - buses[:, B['Gs']] * v ** 2
+        qg_new = scatter_add(generators[:, G['qg']], bus_i, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
+        delta_q = qg_new - buses[:, B['Qd']] + buses[:, B['Bs']] * v ** 2
         # num_nodes = 100
         # num_edges = 1000
         # in_dim = 32
@@ -211,50 +202,50 @@ class GNS(nn.Module):
             m = m + m_update * alpha
 
             Pg_new, qg_new = global_active_compensation(v, theta, buses, lines, generators, B, L, G)
-            # no matrix afterwards as Pg is last column
-            # generators = torch.cat((generators[:, :G['Pg']], Pg_new.unsqueeze(dim=1)), dim=1)
-            # buses = torch.cat((buses[:, :B['qg']], qg_new.unsqueeze(dim=1), buses[:, B['qg'] + 1:]), dim=1)
+
             delta_p, delta_q = local_power_imbalance(v, theta, buses, lines, generators, Pg_new, qg_new, B, L, G)
+
             rng_o1 = torch.rand(1)
-            if rng_o1 < self.K/100 and k==K-1:
+            if rng_o1 < self.K/500 and k == self.K-1:
                 print(f'delta_p: {delta_p.data[:7]}')
                 print(f'delta_q: {delta_q.data[:7]}')
             total_loss = total_loss + self.gamma**(self.K - k) * torch.sum(delta_p.pow(2) + delta_q.pow(2)) / buses.shape[0]
         return v, theta, total_loss
 
-# Weights and Biases package
-# wandb.login()
 
 if __name__ == '__main__':
+    # Weights and Biases package
+    # wandb.login()
+
     # initialization
     latent_dim = 10  # increase later
     hidden_dim = 10  # increase later
     gamma = 0.9
     K = 10  # correction updates, 30 in paper, less for debugging
-    if torch.cuda.is_available():
-        torch.set_default_device('cuda')
+
+    # if torch.cuda.is_available():
+    #     torch.set_default_device('cuda')
+
     model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
-    torch.autograd.set_detect_anomaly(True)
+    best_model = model
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     n_runs = 10 ** 6  # 10**6 used in paper
     best_loss = torch.tensor(float('inf'))
-    best_model = model
     loss_increase_counter = 0
     case_nr = 14  # 14, 30, 118, 300
     batch_size = 5
-    print_every = 3
+    print_every = 1
+    nr_samples = 500
 
-    nr_samples = 20
     all_buses, all_lines, all_generators = load_all_grids(case_nr, nr_samples=nr_samples)
 
     for run in range(n_runs):
         model.train()
-        # loop through all batches in one run
-        # augmentation_nr = random.randint(1, 1000)  # random augmentation of the 10
-        # batch_loader = [[i for i in range(j * batch_size, j * batch_size + batch_size)] for j in range(torch.ceil(torch.tensor(nr_samples/batch_size)).int())]
-        # # augmentation_nr = 1  # 0 is not modified case
+        batch_loader = [[i for i in range(j * batch_size, j * batch_size + batch_size)] for j in range(torch.ceil(torch.tensor(nr_samples/batch_size)).int())]
+
+        ### update after each batch, indent optimizer.step() and optimizer.zero_grad()
         # run_losses = []
         # for batch in batch_loader:
         #     losses = []
@@ -262,20 +253,21 @@ if __name__ == '__main__':
         #         buses, lines, generators = all_buses[grid_i], all_lines[grid_i], all_generators[grid_i]
         #         v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
         #         losses.append(loss)
+
+        ### looping through all samples for update
         losses = []
         for grid_i in range(nr_samples):
             buses, lines, generators = all_buses[grid_i], all_lines[grid_i], all_generators[grid_i]
             v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
             losses.append(loss)
-        # total_loss = sum(losses) / batch_size
+
         total_loss = sum(losses) / len(losses)
+        # print(f'Run: {run}, Loss: {total_loss}')
         total_loss.backward()
 
         optimizer.step()
         optimizer.zero_grad()
-        # run_losses.append(total_loss.data)
 
-        # run_loss = sum(total_loss) / n_runs
         if total_loss >= best_loss:
             loss_increase_counter += 1
             if loss_increase_counter > 100:

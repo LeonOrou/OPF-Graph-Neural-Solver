@@ -22,9 +22,10 @@ def prepare_grid(case_nr, augmentation_nr):
     buses = torch.tensor(bus_data[:, [0, 1, 2, 3, 4, 5]], dtype=torch.float32)
     # Gs and Bs have defaults of 1 in paper, but 0 in matpower
     # Bs is not everywhere 0, but in paper it is everywhere 1 p.u. (of the Qd?)
-    buses[:, [4, 5]] = 1.  # Gs and Bs
+    buses[:, 4] = 1.  # Gs
+    buses[:, 5] = -1  # Bs
     baseMV = case_augmented['baseMVA']  # mostly 100
-    buses = torch.cat((buses, torch.zeros((buses.shape[0], 1), dtype=torch.float32)), dim=1)  # add qg column for inserting values
+    buses = torch.cat((buses, torch.zeros((buses.shape[0], 2), dtype=torch.float32)), dim=1)  # add qg and pg column for inserting values
     # normalize all P, Q, Gs and Bs to get gs and bs by dividing by baseMV
     buses[:, [2, 3, 4, 5, 6]] /= baseMV
 
