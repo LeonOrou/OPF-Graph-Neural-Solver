@@ -8,3 +8,11 @@
 /dataSources.local.xml
 # GitHub Copilot persisted chat sessions
 /copilot/chatSessions
+.venv/
+.idea/
+data/
+.vscode/
+models/
+Interesting Papers/
+/Manus GNN notes.docx
+
