@@ -1,12 +1,9 @@
-# Default ignored files
-/shelf/
-/workspace.xml
-# Editor-based HTTP Client requests
-/httpRequests/
+# /shelf/
+# /workspace.xml
+# /httpRequests/
 # Datasource local storage ignored files
-/dataSources/
-/dataSources.local.xml
-# GitHub Copilot persisted chat sessions
+# /dataSources/
+# /dataSources.local.xml
 /copilot/chatSessions
 .venv/
 .idea/
@@ -14,5 +11,16 @@ data/
 .vscode/
 models/
 Interesting Papers/
-Manos GNN notes.docx
+/Manos GNN notes.docx
+
+# Ignore everything
+*
+
+# But don't ignore Python and text files
+!*.py
+!*.txt
+!*.md
+
+# Also don't ignore .gitignore
+!.gitignore
 
