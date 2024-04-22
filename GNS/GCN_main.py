@@ -119,7 +119,9 @@ def local_power_imbalance(v, theta, buses, lines, gens, pg_k, qg_k, B, L, G):
 class GNS(nn.Module):
     def __init__(self, latent_dim=10, hidden_dim=10, K=30, gamma=0.9):
         super(GNS, self).__init__()
-        self.multiple_phis = True
+
+        self.multiple_phis = False  # if three different phis should be used for each input or the same
+
         if self.multiple_phis:
             self.phi_v = nn.ModuleDict()
             self.phi_theta = nn.ModuleDict()
@@ -139,9 +141,9 @@ class GNS(nn.Module):
             else:
                 self.phi[str(k)] = LearningBlock(5 + latent_dim, hidden_dim, 1)
 
-            self.L_theta[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=1)
-            self.L_v[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=1)
-            self.L_m[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=latent_dim)
+            self.L_theta[str(k)] = LearningBlock(dim_in=4 + 2 * latent_dim, hidden_dim=hidden_dim, dim_out=1)
+            self.L_v[str(k)] = LearningBlock(dim_in=4 + 2 * latent_dim, hidden_dim=hidden_dim, dim_out=1)
+            self.L_m[str(k)] = LearningBlock(dim_in=4 + 2 * latent_dim, hidden_dim=hidden_dim, dim_out=latent_dim)
 
         self.latent_dim = latent_dim
         self.gamma = gamma
@@ -217,7 +219,7 @@ def main():
     latent_dim = 10  # increase later
     hidden_dim = 10  # increase later
     gamma = 0.9
-    K = 3  # correction updates, 30 in paper, less for debugging
+    K = 4  # correction updates, 30 in paper, less for debugging
 
     model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K, gamma=gamma)
 
@@ -243,11 +245,14 @@ def main():
             "learning_rate": lr,
             "epochs": epochs,
             "batch_size": batch_size,
+            "nr_samples": nr_samples,
             "latent_dim": latent_dim,
             "hidden_dim": hidden_dim,
             "case_nr": case_nr,
             "K": K,
-            "nr_samples": nr_samples})
+            "nr_samples": nr_samples,
+            "gamma": gamma,
+            "Multiple Phis": model.multiple_phis})
 
     for epoch in range(epochs):
         epoch_final_losses = torch.zeros(nr_samples // batch_size)
@@ -280,9 +285,11 @@ def main():
             best_model = model
             loss_increase_counter = 0
             torch.save(best_model.state_dict(), f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_L{torch.ceil(epoch_final_loss)}.pth')
-            # wandb.log_artifact(model)
+
         if epoch % print_every == 0:
             print(f'Epoch: {epoch}, Final Loss: {epoch_final_loss}, best loss: {best_loss}')
+        if epoch == 100:  # epoch starts at 0
+            wandb.log_artifact(best_model)
 
 
 if __name__ == '__main__':
