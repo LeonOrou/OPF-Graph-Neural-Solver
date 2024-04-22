@@ -1,14 +1,13 @@
 import torch
 from torch_scatter import scatter_add
-from torch import index_add
 import torch.nn as nn
 import random
 import pickle as pkl
 from torch_geometric.data import Data
-from torch_geometric.nn import MessagePassing
-from torch_geometric.utils import add_self_loops, degree
+# from torch_geometric.nn import MessagePassing
 from utils import get_BLG, load_all_grids
 from torch.profiler import profile, record_function, ProfilerActivity
+# import cProfile
 # import wandb
 
 
@@ -72,8 +71,6 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
         # if torch.any(Pg_new > gens[:, G['Pmax']]):
         print(f'lambda: {lambda_}')
     qg_new_start = buses[:, B['Qd']] - buses[:, B['Bs']] * v.pow(2)
-    src = torch.tensor((lines[:, L['f_bus']]).int() - 1, dtype=torch.int64)
-    dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
 
     delta_ji = theta[dst] - theta[src]
     # theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
@@ -122,19 +119,19 @@ def local_power_imbalance(v, theta, buses, lines, gens, pg_k, qg_k, B, L, G):
 class GNS(nn.Module):
     def __init__(self, latent_dim=10, hidden_dim=10, K=30, gamma=0.9):
         super(GNS, self).__init__()
-        # self.correction_block = nn.ModuleDict()
 
-        self.phi_from = nn.ModuleDict()
-        # self.phi_to = nn.ModuleDict()
-        # self.phi_loop = nn.ModuleDict()
+        self.phi_v = nn.ModuleDict()
+        self.phi_theta = nn.ModuleDict()
+        self.phi_m = nn.ModuleDict()
+
         self.L_theta = nn.ModuleDict()
         self.L_v = nn.ModuleDict()
         self.L_m = nn.ModuleDict()
 
         for k in range(K):
-            self.phi_from[str(k)] = LearningBlock(5 + latent_dim, hidden_dim, 1)
-            # self.phi_to[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
-            # self.phi_loop[str(k)] = LearningBlock(latent_dim + 5, hidden_dim, latent_dim)
+            self.phi_v[str(k)] = LearningBlock(5 + latent_dim, hidden_dim, 1)
+            self.phi_theta[str(k)] = LearningBlock(5 + latent_dim, hidden_dim, 1)
+            self.phi_m[str(k)] = LearningBlock(5 + latent_dim, hidden_dim, 1)
 
             self.L_theta[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=1)
             self.L_v[str(k)] = LearningBlock(dim_in=5 + latent_dim, hidden_dim=hidden_dim, dim_out=1)
@@ -178,25 +175,27 @@ class GNS(nn.Module):
         dst = lines[:, 1].long() - 1
         for k in range(self.K):
             phi_from_input = torch.cat((m[dst], lines[:, 2:]), dim=1)
-            # phi_to_input = torch.cat((m[dst], lines[:, 2:]), dim=1) * (1-loop_mask)
-            # phi_loop_input = torch.cat((m[dst], lines[:, 2:]), dim=1)
-            # ?only "phi_from" because we collect information only "from" neighbors
-            phi_from_input = self.phi_from[str(k)](phi_from_input)
-            phi_from_sum = scatter_add(phi_from_input, dst, out=torch.zeros((buses.shape[0], 1), dtype=torch.float32), dim=0)
-            # phi_to_sum = scatter_add(phi_res_v, dst, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
-            # phi_loop_sum = scatter_add(phi_res_m, dst, out=torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32), dim=0)
+            phi_v_input = self.phi_v[str(k)](phi_from_input)
+            phi_theta_input = self.phi_theta[str(k)](phi_from_input)
+            phi_m_input = self.phi_m[str(k)](phi_from_input)
 
-            network_input = torch.cat((v.unsqueeze(1), theta.unsqueeze(1), delta_p.unsqueeze(1), delta_q.unsqueeze(1), m, phi_from_sum), dim=1)
+            phi_v_sum = scatter_add(phi_v_input, dst, out=torch.zeros((buses.shape[0], 1), dtype=torch.float32), dim=0)
+            phi_theta_sum = scatter_add(phi_theta_input, dst, out=torch.zeros((buses.shape[0], 1), dtype=torch.float32), dim=0)
+            phi_m_sum = scatter_add(phi_m_input, dst, out=torch.zeros((buses.shape[0], 1), dtype=torch.float32), dim=0)
 
-            theta_update = self.L_theta[str(k)](network_input)
+            network_input_v = torch.cat((v.unsqueeze(1), theta.unsqueeze(1), delta_p.unsqueeze(1), delta_q.unsqueeze(1), m, phi_v_sum), dim=1)
+            network_input_theta = torch.cat((v.unsqueeze(1), theta.unsqueeze(1), delta_p.unsqueeze(1), delta_q.unsqueeze(1), m, phi_theta_sum), dim=1)
+            network_input_m = torch.cat((v.unsqueeze(1), theta.unsqueeze(1), delta_p.unsqueeze(1), delta_q.unsqueeze(1), m, phi_m_sum), dim=1)
+
+            theta_update = self.L_theta[str(k)](network_input_theta)
             theta = theta + theta_update.squeeze()
 
-            v_update = self.L_v[str(k)](network_input)
+            v_update = self.L_v[str(k)](network_input_v)
             non_gens_mask = torch.ones_like(v, dtype=torch.bool)
             non_gens_mask[generators[:, G['bus_i']].long() - 1] = False
             v = torch.where(non_gens_mask, v + v_update.squeeze(), v)
 
-            m_update = self.L_m[str(k)](network_input)
+            m_update = self.L_m[str(k)](network_input_m)
             m = m + m_update
 
             Pg_new, qg_new = global_active_compensation(v, theta, buses, lines, generators, B, L, G)
@@ -204,15 +203,14 @@ class GNS(nn.Module):
             delta_p, delta_q = local_power_imbalance(v, theta, buses, lines, generators, Pg_new, qg_new, B, L, G)
 
             rng_o1 = torch.rand(1)
-            if rng_o1 < self.K/3000 and k == self.K-1:
+            if rng_o1 < self.K/3000 and k == self.K:
                 print(f'delta_p: {delta_p.data[:7]}')
                 print(f'delta_q: {delta_q.data[:7]}')
             total_loss = total_loss + self.gamma**(self.K - k) * torch.sum(delta_p.pow(2) + delta_q.pow(2)).div(buses.shape[0])
         return v, theta, total_loss
 
 
-if __name__ == '__main__':
-
+def main():
     # Weights and Biases package
     # wandb.login()
 
@@ -220,58 +218,79 @@ if __name__ == '__main__':
     latent_dim = 10  # increase later
     hidden_dim = 10  # increase later
     gamma = 0.9
-    K = 10  # correction updates, 30 in paper, less for debugging
+    K = 2  # correction updates, 30 in paper, less for debugging
 
-    model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
+    model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K, gamma=gamma)
 
     ## comment CUDA code below for CPU usage
     # if torch.cuda.is_available():
     #     torch.set_default_device('cuda')
     # model.to(torch.device('cuda'))
 
-    best_model = model
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-
-    n_runs = 10  # 10.pow(6) used in paper
+    epochs = 10**6  # 10**6 used in paper
+    lr = 0.001
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     best_loss = torch.tensor(float('inf'))
     loss_increase_counter = 0
     case_nr = 14  # 14, 30, 118, 300
-    # batch_size = 5
+    batch_size = 2**7  # 2**7==128
     print_every = 1
-    nr_samples = 10
-    with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
-        with record_function("model_inference"):
-            all_buses, all_lines, all_generators = load_all_grids(case_nr, nr_samples=nr_samples)
+    nr_samples = 2**10  # 2**10==1024
+    all_buses, all_lines, all_generators = load_all_grids(case_nr, nr_samples=nr_samples)
 
-            for run in range(n_runs):
-                model.train()
-                losses = torch.zeros(nr_samples, dtype=torch.float64)
-                for i in range(nr_samples):
-                    buses, lines, generators = all_buses[i], all_lines[i], all_generators[i]
-                    v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
-                    losses[i] = loss
+    # wandb_run = wandb.init(
+    #     project="GNS",
+    #     config={
+    #         "learning_rate": lr,
+    #         "epochs": epochs,
+    #         "batch_size": batch_size,
+    #         "latent_dim": latent_dim,
+    #         "hidden_dim": hidden_dim,
+    #         "case_nr": case_nr,
+    #         "K": K,
+    #         "nr_samples": nr_samples,
+    #     },
+    # )
 
-                total_loss = torch.mean(losses)
-                # print(f'Run: {run}, Loss: {total_loss}')
-                total_loss.backward()
+    for epoch in range(epochs):
+        epoch_losses = torch.zeros(nr_samples // batch_size, dtype=torch.float64)
+        for batch_idx_start in range(0, nr_samples, batch_size):
+            losses = torch.zeros(batch_size, dtype=torch.float64)
+            for i in range(batch_idx_start, batch_idx_start + batch_size):
+                buses, lines, generators = all_buses[i], all_lines[i], all_generators[i]
+                v, theta, loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
+                losses[i % batch_size] = loss  # -1 because i starts at 1 because 0 is not augmented
 
-                optimizer.step()
-                optimizer.zero_grad()
+            total_loss = torch.mean(losses)
+            epoch_losses[batch_idx_start // batch_size] = total_loss.data
+            # wandb.log({"epoch": epoch, "loss": total_loss})
+            # print(f'Run: {epoch}, Batch Loss: {total_loss}')
+            total_loss.backward()
 
-                if total_loss >= best_loss:
-                    loss_increase_counter += 1
-                    if loss_increase_counter > 100:
-                        print('Loss is increasing')
-                        break
-                else:
-                    best_loss = total_loss
-                    best_model = model
-                    loss_increase_counter = 0
-                    torch.save(best_model.state_dict(), f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}.pth')
-                if run % print_every == 0:
-                    print(f'Run: {run}, Loss: {total_loss}, best loss: {best_loss}')
+            optimizer.step()
+            optimizer.zero_grad()
 
-    print(prof.key_averages(group_by_input_shape=True).table(sort_by="cpu_time_total", row_limit=10))
+        epoch_loss = torch.mean(epoch_losses)
+        if epoch_loss >= best_loss:
+            loss_increase_counter += 1
+            if loss_increase_counter > 100:
+                print('Loss is increasing')
+                break
+        else:
+            best_loss = epoch_loss
+            best_model = model
+            loss_increase_counter = 0
+            torch.save(best_model.state_dict(), f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}.pth')
+        if epoch % print_every == 0:
+            print(f'Run: {epoch}, Epoch Loss: {epoch_loss}, best loss: {best_loss}')
 
+
+if __name__ == '__main__':
+    ## pytorch profiler
+    # with profile(activities=[ProfilerActivity.CUDA]) as prof:
+    #     with record_function("model_inference"):
+    #         main()
+    # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+
+    main()
 
