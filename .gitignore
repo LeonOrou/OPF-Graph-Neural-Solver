@@ -20,6 +20,7 @@ Interesting Papers/
 !*.py
 !*.txt
 !*.md
+!/GNS/wandb/
 
 # Also don't ignore .gitignore
 !.gitignore
