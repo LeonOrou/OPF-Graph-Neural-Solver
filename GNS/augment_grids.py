@@ -5,8 +5,8 @@ import pickle
 import copy
 
 # Load the caseXXX dataset from pypower.api library, change XXX to one of [14, 30, 118, 300]
-case = case14()  # change caseXXX to one of [case14(), case30(), case118(), case300()]
-case_nr = 14  # change XXX to one of [14, 30, 118, 300]
+case = case118()  # change caseXXX to one of [case14(), case30(), case118(), case300()]
+case_nr = 118  # change XXX to one of [14, 30, 118, 300]
 
 # Define the augmentation ranges
 r_range = [0.9, 1.1]
