@@ -1,17 +1,10 @@
 import torch
 from torch_scatter import scatter_add
 import torch.nn as nn
-# import random
-# import pickle as pkl
-# from torch_geometric.data import Data
-# from torch_geometric.nn import MessagePassing
 from utils import get_BLG, load_all_grids
-# from torch.profiler import profile, record_function, ProfilerActivity
-# import cProfile
 import wandb
 import itertools
 import time
-from torch.optim.lr_scheduler import CosineAnnealingLR
 
 
 # paper for this whole project, very careful reading: https://pscc-central.epfl.ch/repo/papers/2020/715.pdf
@@ -26,7 +19,6 @@ class LearningBlock(nn.Module):  # later change hidden dim to more dims, current
         super(LearningBlock, self).__init__()
         self.linear1 = nn.Linear(dim_in, hidden_dim)
         self.linear2 = nn.Linear(hidden_dim, hidden_dim)
-        # self.linear3 = nn.Linear(hidden_dim, hidden_dim)
         self.linear4 = nn.Linear(hidden_dim, dim_out)
         self.lrelu = nn.LeakyReLU()
 
@@ -34,8 +26,6 @@ class LearningBlock(nn.Module):  # later change hidden dim to more dims, current
         x = self.linear1(x)
         x = self.lrelu(x)
         x = self.linear2(x)
-        # x = self.lrelu(x)
-        # x = self.linear3(x)
         x = self.lrelu(x)
         x = self.linear4(x)
         return x
@@ -46,9 +36,7 @@ def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
     dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
 
     y_ij = 1 / torch.sqrt(lines[:, L['r']].pow(2) + lines[:, L['x']].pow(2))
-    # delta_ij refers to v difference between i and j, not the angle difference
     delta_ij = theta[src] - theta[dst]
-    # theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
     theta_shift_ij = lines[:, L['theta']]
     msg = torch.abs(v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * (torch.sin(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + torch.sin(theta[dst] - theta[src] - delta_ij[src] + theta_shift_ij[src])) + (v[src] / lines[:, L['tau']][src].pow(2)) * y_ij[src] * torch.sin(delta_ij[src]) + v[dst].pow(2) * y_ij[src] * torch.sin(delta_ij[src]))
     aggregated_neighbor_features = scatter_add(msg, dst, out=torch.zeros((buses.shape[0])), dim=0)
@@ -120,7 +108,7 @@ class GNS(nn.Module):
     def __init__(self, latent_dim=10, hidden_dim=10, K=30, gamma=0.9, multiple_phi=False):
         super(GNS, self).__init__()
 
-        self.multiple_phis = multiple_phi  # if three different phis should be used for each input or the same
+        self.multiple_phis = multiple_phi  # if three different phi networks should be used for each L input or the same
 
         if self.multiple_phis:
             self.phi_v = nn.ModuleDict()
@@ -160,7 +148,6 @@ class GNS(nn.Module):
         delta_p = pg_new - buses[:, B['Pd']] - buses[:, B['Gs']] * v.pow(2)
         qg_new = scatter_add(generators[:, G['qg']], bus_i, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
         delta_q = qg_new - buses[:, B['Qd']] + buses[:, B['Bs']] * v.pow(2)
-        # src = lines[:, 0].long() - 1  # Compute i and j for all lines at once
         dst = lines[:, 1].long() - 1
         for k in range(self.K):
             phi_from_input = torch.cat((m[dst], lines[:, 2:]), dim=1)
@@ -191,12 +178,6 @@ class GNS(nn.Module):
                 m_update = self.L_m[str(k)](network_input)
 
             theta = theta + theta_update.squeeze()
-            # keep all values between -pi and pi, normalize others, use modulo
-            # # TODO: remove if bullshit
-            # print theta
-            rng_o1 = torch.rand(1)
-            if rng_o1 < 0.0008:
-                print(f'theta: {theta.data[:7]}')
 
             non_gens_mask = torch.ones_like(v, dtype=torch.bool)
             non_gens_mask[generators[:, G['bus_i']].long() - 1] = False
@@ -233,7 +214,6 @@ def main():
               'multiple_phi': [False, True]}
 
     parameter_grid = itertools.product(*params.values())
-    ## measure time how long each parameter set takes, and log it
 
     for params_i, parameter_set in enumerate(parameter_grid):
         latent_dim, hidden_dim, K, multiple_phi = parameter_set
@@ -259,7 +239,6 @@ def main():
         # warmup_steps = 24
         # lambda1 = lambda step: (lr ** (1 - step / warmup_steps)) if step < warmup_steps else 1
         # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
-        # scheduler = CosineAnnealingLR(optimizer, T_max=6)  # Adjust T_max according to your total epochs
 
         best_loss = torch.tensor(float('inf'))
         loss_increase_counter = 0
@@ -315,7 +294,6 @@ def main():
                 best_loss = epoch_final_loss
                 best_model = model
                 loss_increase_counter = 0
-
 
             if epoch % print_every == 0:
                 print(f'Epoch: {epoch}, Final Loss: {epoch_final_loss}, best loss: {best_loss}')

@@ -60,7 +60,7 @@ B, L, G = get_BLG()
 GNS_duration_times = np.zeros(nr_eval_samples, dtype=np.float32)
 GNS_theta_out = np.zeros((nr_eval_samples, case_nr), dtype=np.float32)
 GNS_v_out = np.zeros((nr_eval_samples, case_nr), dtype=np.float32)
-for i, grid_i in enumerate(range(1001-nr_eval_samples, 1001)):
+for i, grid_i in enumerate(range(2000-nr_eval_samples, 2000)):
     case_augmented = pkl.load(open(f'../data/case{case_nr}/augmented_case{case_nr}_{grid_i}.pkl', 'rb'))
     buses, lines, generators = prepare_grid(case_nr, i)
     # making theta_shift rad
