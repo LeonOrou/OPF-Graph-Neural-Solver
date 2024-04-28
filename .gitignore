@@ -22,6 +22,7 @@ Interesting Papers/
 !*.md
 !/GNS/wandb/
 
-# Also don't ignore .gitignore
+# Also don't ignore specific files
 !.gitignore
+
 
