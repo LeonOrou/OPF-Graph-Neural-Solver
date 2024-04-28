@@ -31,6 +31,8 @@ def prepare_grid(case_nr, augmentation_nr):
 
     lines = torch.tensor(lines_data[:, [0, 1, 2, 3, 4, 8, 9]], dtype=torch.float32)
     lines[:, L['tau']] = torch.where(lines[:, L['tau']] == 0, 1, lines[:, L['tau']])
+    # make theta rad, has to be here because DC/NR work with degrees
+    lines[:, 6] = torch.deg2rad(lines[:, 6])
 
     generators = torch.tensor(gen_data[:, [0, 8, 9, 1, 5, 2]], dtype=torch.float32)
     generators = torch.cat((generators, generators[:, 3].unsqueeze(dim=1)), dim=1)  # copy Pg and concat changable Pg and leave original Pg as Pg_set
@@ -57,7 +59,7 @@ def load_all_grids(case_nr, nr_samples=100, test_set=False):
     all_generators = torch.zeros((nr_samples, nr_gens, 7), dtype=torch.float32)
     start_idx = 1  # i==0 is not augmented case, exclude
     if test_set:
-        start_idx = 1000-samples
+        start_idx = 10000-samples
     for i, grid_i in enumerate(range(start_idx, nr_samples+start_idx)):
         buses, lines, generators = prepare_grid(case_nr, grid_i)
         all_buses[i] = buses

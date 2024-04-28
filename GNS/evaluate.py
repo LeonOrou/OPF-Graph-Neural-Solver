@@ -15,10 +15,10 @@ from GCN_main import GNS
 
 # load the grid
 case_nr = 14  # 14, 30, 118, 300
-nr_eval_samples = 100
+nr_eval_samples = 5
 
 # get optimal solution from newton raphson from library
-newton_raphson = ppoption(PF_ALG=1, verbose=0)  # newton's method
+newton_raphson = ppoption(PF_ALG=1, VERBOSE=0)  # newton's method
 NR_duration_times = np.zeros(nr_eval_samples, dtype=np.float32)
 NR_theta_out = np.zeros((nr_eval_samples, case_nr), dtype=np.float32)
 NR_v_out = np.zeros((nr_eval_samples, case_nr), dtype=np.float32)
@@ -34,7 +34,7 @@ for i, grid_i in enumerate(range(1001-nr_eval_samples, 1001)):
 
 
 # DC algorithm
-dc_solver = ppoption(PF_ALG=2, verbose=0)  # DC algorithm, XB version, neglecting influence on reactive power flows
+dc_solver = ppoption(PF_ALG=2, VERBOSE=0)  # DC algorithm, XB version, neglecting influence on reactive power flows
 DC_duration_times = np.zeros(nr_eval_samples, dtype=np.float32)
 DC_theta_out = np.zeros((nr_eval_samples, case_nr), dtype=np.float32)
 DC_v_out = np.zeros((nr_eval_samples, case_nr), dtype=np.float32)
@@ -50,12 +50,12 @@ for i, grid_i in enumerate(range(1001-nr_eval_samples, 1001)):
 
 # GNS
 case_nr = 14
-K = 10
+K = 4
 latent_dim = 10
 hidden_dim = 10
-batch_size = 5
-model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K)
-model.load_state_dict(torch.load(f'../models/best_model_c14_K10_L10_H10.pth'))
+multiple_phi = False
+model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K, multiple_phi=multiple_phi)
+model.load_state_dict(torch.load(f'../models/best_model_c14_K4_L10_H10_False_optimAdam.pth'))
 B, L, G = get_BLG()
 GNS_duration_times = np.zeros(nr_eval_samples, dtype=np.float32)
 GNS_theta_out = np.zeros((nr_eval_samples, case_nr), dtype=np.float32)
@@ -63,8 +63,10 @@ GNS_v_out = np.zeros((nr_eval_samples, case_nr), dtype=np.float32)
 for i, grid_i in enumerate(range(1001-nr_eval_samples, 1001)):
     case_augmented = pkl.load(open(f'../data/case{case_nr}/augmented_case{case_nr}_{grid_i}.pkl', 'rb'))
     buses, lines, generators = prepare_grid(case_nr, i)
+    # making theta_shift rad
+    # lines[:, 6] = np.deg2rad(lines[:, 6])
     start = time.perf_counter()
-    v_gns, theta_gns, loss_gns = model(buses, lines, generators, B, L, G)
+    v_gns, theta_gns, loss_gns, last_loss = model(buses, lines, generators, B, L, G)
     stop = time.perf_counter()
     duration_gns = stop - start
     GNS_duration_times[i] = duration_gns
@@ -80,6 +82,9 @@ std_diff_time_gns = np.std(time_diff_gns_nr)
 mean_diff_time_nr = np.mean(time_diff_nr_dc)
 std_diff_time_nr = np.std(time_diff_nr_dc)
 
+# convert theta to radians
+NR_theta_out = np.deg2rad(NR_theta_out)
+DC_theta_out = np.deg2rad(DC_theta_out)
 theta_diff_gns_nr = np.abs(GNS_theta_out - NR_theta_out)
 theta_diff_nr_dc = np.abs(NR_theta_out - DC_theta_out)
 mean_diff_theta_gns = np.mean(theta_diff_gns_nr)
