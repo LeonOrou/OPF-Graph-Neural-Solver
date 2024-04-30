@@ -1,4 +1,4 @@
-from pypower.api import case14, case30, case118, case300
+from pypower.api import case9, case14, case30, case118, case300
 import numpy as np
 import os
 import pickle
@@ -19,13 +19,18 @@ pg_range = [0.25, 0.75]
 pd_range = [0.5, 1.5]
 qd_range = [0.5, 1.5]
 
-num_augmentations = 2000
+num_augmentations = 10000
 # Perform data augmentations
 augmented_data = []
 for _ in range(num_augmentations):
     if len(augmented_data) == 0:
         augmented_data.append(copy.deepcopy(case))
     augmented_case = copy.deepcopy(case)
+    # make datatyoes of 'bus', 'branch', 'gen' numpy arrays dtype('float64')
+    augmented_case['bus'] = np.array(augmented_case['bus'], dtype='float64')
+    augmented_case['branch'] = np.array(augmented_case['branch'], dtype='float64')
+    augmented_case['gen'] = np.array(augmented_case['gen'], dtype='float64')
+
     # Perturb r, x, b
     augmented_case['branch'][:, 2] *= np.random.uniform(*r_range, size=augmented_case['branch'].shape[0])
     augmented_case['branch'][:, 3] *= np.random.uniform(*x_range, size=augmented_case['branch'].shape[0])
@@ -35,7 +40,7 @@ for _ in range(num_augmentations):
     # Perturb theta shift
     augmented_case['branch'][:, 9] = np.random.uniform(*theta_shift_range, size=augmented_case['branch'].shape[0])
     # Perturb vg
-    augmented_case['gen'][:, 5] *= np.random.uniform(*vg_range, size=augmented_case['gen'].shape[0])
+    augmented_case['gen'][:, 5] = augmented_case['gen'][:, 5] * np.random.uniform(*vg_range, size=augmented_case['gen'].shape[0])
     # Perturb pg
     pg_max = (augmented_case['gen'][:, 8] - augmented_case['gen'][:, 9]) * pg_range[1]  # in case Pmin is not 0, the range changes
     pg_min = (augmented_case['gen'][:, 8] - augmented_case['gen'][:, 9]) * pg_range[0]
