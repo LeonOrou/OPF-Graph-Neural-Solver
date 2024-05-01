@@ -5,13 +5,17 @@
 # /dataSources/
 # /dataSources.local.xml
 /copilot/chatSessions
-.venv/
-.idea/
-data/
-.vscode/
+/.venv/
+/.idea/
+/data/
+/.vscode/
 models/
-Interesting Papers/
+/Interesting Papers/
 /Manos GNN notes.docx
+/.gitattributes
+/Interesting Papers
+/images
+test.py/
 
 # Ignore everything
 *
