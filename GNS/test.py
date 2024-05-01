@@ -1,138 +1,325 @@
 import torch
+from torch_scatter import scatter_add
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.nn import Linear
-import random
-import pickle as pkl
-import torch_geometric.nn as pyg_nn
-from torch_geometric.nn import GCNConv
-from torch_geometric.data import Data, DataLoader
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+from utils import get_BLG, load_all_grids
+import wandb
+import itertools
+import time
 
 
-def get_BLG():
-    # add column qg to buses with default value 0 as we later use qg for each bus
-    B = {'bus_i': 0, 'type': 1, 'Pd': 2, 'Qd': 3, 'Gs': 4, 'Bs': 5, 'qg': 6}  # indices of bus data
-
-    # lines = torch.tensor(branch_data[:, [0, 1, 2, 3, 4, 8, 9]], dtype=torch.float32)
-    L = {'f_bus': 0, 't_bus': 1, 'r': 2, 'x': 3, 'b': 4, 'tau': 5, 'theta': 6}  # indices of branch data
-    # if tau=0, set it to 1: 0 is default in pypower, but matpower default is 1 (ratio cant be 0)
-    # lines[:, L['tau']] = torch.where(lines[:, L['tau']] == 0, 1, lines[:, L['tau']])
-
-    # generators = torch.tensor(gen_data[:, [0, 8, 9, 1, 5, 2]], dtype=torch.float32)
-    G = {'bus_i': 0, 'Pmax': 1, 'Pmin': 2, 'Pg_set': 3, 'vg': 4, 'qg': 5, 'Pg': 6}  # indices of generator data
-    # generators[generators_data[:, G['bus_i']].int() - 1] = generators_data  # -1 as bus indices start from 1
-    # generators[:, G['bus_i']] = torch.tensor(range(1, buses.shape[0]+1))  # set bus indices to match buses, gen indices stay the same
-    # del generators_data  # delete to free memory, use generators for same length as buses
-
-    # costs = torch.tensor(cost_data, dtype=torch.float32)  # needed?
-    # cost format: model, startup cost, shutdown cost, nr coefficients, cost coefficients
-    return B, L, G
-
+# paper for this whole project, very careful reading: https://pscc-central.epfl.ch/repo/papers/2020/715.pdf
+# documentation of data formats for pypower, very careful reading: https://rwl.github.io/PYPOWER/api/pypower.caseformat-module.html
+## case format: https://rwl.github.io/PYPOWER/api/pypower.caseformat-module.html
 
 B, L, G = get_BLG()
 
 
-def prepare_grid(case_nr, augmentation_nr):
-    case_augmented = pkl.load(open(f'../data/case{case_nr}/augmented_case{case_nr}_{augmentation_nr}.pkl', 'rb'))
-    bus_data = torch.tensor(case_augmented['bus'], dtype=torch.float32)
-    buses = torch.tensor(bus_data[:, [0, 1, 2, 3, 4, 5]], dtype=torch.float32)
-    # Gs and Bs have defaults of 1 in paper, but 0 in matpower
-    # Bs is not everywhere 0, but in paper it is everywhere 1 p.u. (of the Qd?)
-    buses[:, 4] = buses[:, 3]
-    buses[:, 5] = buses[:, 3]
-    baseMV = 100  # set to 100 in GitHub, no default in Matpower
-    buses[:, 4] /= baseMV  # normalize Gs and Bs to gs and bs by dividing by baseMV
-    buses[:, 5] /= baseMV
-    buses = torch.cat((buses, torch.zeros((buses.shape[0], 1), dtype=torch.float32)),
-                      dim=1)  # add qg column for inserting values
+class LearningBlock(nn.Module):  # later change hidden dim to more dims, currently suggested latent=hidden
+    def __init__(self, dim_in, hidden_dim, dim_out):
+        super(LearningBlock, self).__init__()
+        self.linear1 = nn.Linear(dim_in, hidden_dim)
+        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+        self.linear4 = nn.Linear(hidden_dim, dim_out)
+        self.lrelu = nn.LeakyReLU()
 
-    lines_data = torch.tensor(case_augmented['branch'], dtype=torch.float32)
-    lines = torch.tensor(lines_data[:, [0, 1, 2, 3, 4, 8, 9]], dtype=torch.float32)
-    lines[:, L['tau']] = torch.where(lines[:, L['tau']] == 0, 1, lines[:, L['tau']])
-
-    gen_data = torch.tensor(case_augmented['gen'], dtype=torch.float32)
-    generators = torch.tensor(gen_data[:, [0, 8, 9, 1, 5, 2]], dtype=torch.float32)
-    generators = torch.cat((generators, generators[:, 3].unsqueeze(dim=1)),
-                           dim=1)  # add changable Pg and leave original Pg as Pg_set
-    return buses, lines, generators
+    def forward(self, x):
+        x = self.linear1(x)
+        x = self.lrelu(x)
+        x = self.linear2(x)
+        x = self.lrelu(x)
+        x = self.linear4(x)
+        return x
 
 
-class My_GNN_GNN_NN(torch.nn.Module):
-    def __init__(self, node_size=None, feat_in=None, feat_size1=None, feat_size2=None, hidden_size1=None,
-                 output_size=None):
-        super(My_GNN_GNN_NN, self).__init__()
-        self.feat_in = feat_in if feat_in is not None else 2
-        self.feat_size1 = feat_in if feat_in is not None else 5
-        self.feat_size2 = feat_in if feat_in is not None else 4
-        self.hidden_size1 = hidden_size1 if hidden_size1 is not None else 38
-        self.output_size = output_size if output_size is not None else 18
+def global_active_compensation(v, theta, buses, lines, gens, B, L, G):
+    src = torch.tensor((lines[:, L['f_bus']]).int() - 1, dtype=torch.int64)
+    dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
 
-        self.conv = torch.nn.ModuleDict()
-        for k in range(10):
-            self.conv[str(k)] = GCNConv(feat_in, feat_in)
-        self.conv1 = GCNConv(feat_in, feat_in)
-        self.conv2 = GCNConv(feat_in, feat_in)
-        self.lin1 = Linear(node_size * feat_size2, hidden_size1)
-        self.lin2 = Linear(hidden_size1, output_size)
+    y_ij = 1 / torch.sqrt(lines[:, L['r']].pow(2) + lines[:, L['x']].pow(2))
+    delta_ij = theta[src] - theta[dst]
+    # theta_shift_ij = lines[:, L['theta']]
+    theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
+    msg = torch.abs(v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * (torch.sin(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + torch.sin(theta[dst] - theta[src] - delta_ij[src] + theta_shift_ij[src])) + (v[src] / lines[:, L['tau']][src].pow(2)) * y_ij[src] * torch.sin(delta_ij[src]) + v[dst].pow(2) * y_ij[src] * torch.sin(delta_ij[src]))
+    aggregated_neighbor_features = scatter_add(msg, dst, out=torch.zeros((buses.shape[0])), dim=0)
+    p_joule = torch.sum(aggregated_neighbor_features)
 
-    def forward(self, data):
-        x, edge_index = data.x, data.edge_index
-        for k in range(10):
-            x = self.conv[str(k)](x, edge_index)
+    p_global = torch.sum(buses[:, B['Pd']]) + torch.sum(v.pow(2) * buses[:, B['Gs']]) + p_joule
 
-        # x = self.conv1(x, edge_index)
-        # # x = torch.tanh(x)
-        #
-        # x = self.conv2(x, edge_index)
-        # x = torch.tanh(x)
+    if p_global < gens[:, G['Pg_set']].sum():
+        lambda_ = (p_global - gens[:, G['Pmin']].sum()) / (2 * (gens[:, G['Pg_set']].sum() - gens[:, G['Pmin']].sum()))
+    else:
+        lambda_ = (p_global - 2 * gens[:, G['Pg_set']].sum() + gens[:, G['Pmax']].sum()) / (
+                2 * (gens[:, G['Pmax']].sum() - gens[:, G['Pg_set']].sum()))
 
-        # x = x.flatten(start_dim=0)
-        # x = self.lin1(x)
-        # # x = torch.tanh(x)
-        #
-        # x = self.lin2(x)
+    if lambda_ < 0.5:  # equasion (21) in paper
+        Pg_new = gens[:, G['Pmin']] + 2 * (gens[:, G['Pg_set']] - gens[:, G['Pmin']]) * lambda_
+    else:
+        Pg_new = 2 * gens[:, G['Pg_set']] - gens[:, G['Pmax']] + 2 * (
+                gens[:, G['Pmax']] - gens[:, G['Pg_set']]) * lambda_
 
-        return x.T
+    ## if Pg is larger than Pmax in any value of the same index, this should be impossible!
+    # rnd_o1 = torch.rand(1)
+    # if rnd_o1 < 0.0008:
+    #     # if torch.any(Pg_new > gens[:, G['Pmax']]):
+    #     print(f'lambda: {lambda_}')
+    qg_new_start = buses[:, B['Qd']] - buses[:, B['Bs']] * v.pow(2)
 
-n_bus = 14
-feat_in = 2
-feat_size1 = 8
-feat_size2 = 4
-hidden_size1 = 30
-output_size = n_bus*2
-lr = 0.0001
+    delta_ji = theta[dst] - theta[src]
+    # theta_shift_ji and theta_shift_ij should be the same?
+    msg_from = -v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * torch.cos(
+        theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + (v[src] / lines[:, L['tau']][src]).pow(2) * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']][src] / 2)
+    msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']][dst] * torch.cos(
+        theta[dst] - theta[src] - delta_ji[dst] - theta_shift_ij[dst]) + v[dst].pow(2) * (
+                         y_ij[dst] * torch.sin(delta_ji[dst]) - lines[:, L['b']][dst] / 2)
 
-model = My_GNN_GNN_NN(n_bus, feat_in, feat_size1, feat_size2, hidden_size1, output_size)
-optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    aggr_from = scatter_add(msg_from, dst, out=torch.zeros((buses.shape[0])), dim=0)
+    aggr_to = scatter_add(msg_to, src, out=torch.zeros((buses.shape[0])), dim=0)
+    qg_new = qg_new_start - aggr_from - aggr_to
+
+    return Pg_new, qg_new
+
+def local_power_imbalance(v, theta, buses, lines, gens, pg_k, qg_k, B, L, G):
+    delta_p_gens = scatter_add(pg_k, torch.tensor(gens[:, G['bus_i']] - 1, dtype=torch.int64), out=torch.zeros((buses.shape[0])), dim=0)
+    delta_p_start = delta_p_gens - buses[:, B['Pd']] - buses[:, B['Gs']] * v.pow(2)
+    delta_q_start = qg_k - buses[:, B['Qd']] + buses[:, B['Bs']] * v.pow(2)
+
+    src = torch.tensor((lines[:, L['f_bus']]).int() - 1, dtype=torch.int64)
+    dst = torch.tensor((lines[:, L['t_bus']]).int() - 1, dtype=torch.int64)
+    y_ij = 1 / torch.sqrt(lines[:, L['r']].pow(2) + lines[:, L['x']].pow(2))
+    delta_ij = theta[src] - theta[dst]
+    delta_ji = theta[dst] - theta[src]
+    # theta_shift_ij = lines[:, L['theta']]
+    theta_shift_ij = torch.atan2(lines[:, L['r']], lines[:, L['x']])
+    p_msg_from = v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * torch.sin(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + (v[src] / lines[:, L['tau']][src]).pow(2) * y_ij[src] * torch.sin(delta_ij[src])
+    p_msg_to = v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']][dst] * torch.sin(theta[dst] - theta[src] - delta_ji[dst] - theta_shift_ij[dst]) + v[dst].pow(2) * y_ij[dst] * torch.sin(delta_ji[dst])
+
+    p_sum_from = scatter_add(p_msg_from, dst, out=torch.zeros((buses.shape[0])), dim=0)
+    p_sum_to = scatter_add(p_msg_to, src, out=torch.zeros((buses.shape[0])), dim=0)
+    delta_p = delta_p_start + p_sum_from + p_sum_to
+
+    q_msg_from = -v[src] * v[dst] * y_ij[src] / lines[:, L['tau']][src] * torch.cos(theta[src] - theta[dst] - delta_ij[src] - theta_shift_ij[src]) + (v[src] / lines[:, L['tau']][src]).pow(2) * (y_ij[src] * torch.cos(delta_ij[src]) - lines[:, L['b']][src] / 2)
+    q_msg_to = -v[dst] * v[src] * y_ij[dst] / lines[:, L['tau']][dst] * torch.cos(theta[dst] - theta[src] - delta_ji[dst] - theta_shift_ij[dst]) + v[dst].pow(2) * (y_ij[dst] * torch.sin(delta_ji[dst]) - lines[:, L['b']][dst] / 2)  # last cos is sin in paper??? Shouldnt be true as the complex power is with cos
+
+    q_sum_from = scatter_add(q_msg_from, dst, out=torch.zeros((buses.shape[0])), dim=0)
+    q_sum_to = scatter_add(q_msg_to, src, out=torch.zeros((buses.shape[0])), dim=0)
+    delta_q = delta_q_start + q_sum_from + q_sum_to
+    return delta_p, delta_q
 
 
+class GNS(nn.Module):
+    def __init__(self, latent_dim=10, hidden_dim=10, K=30, gamma=0.9, multiple_phi=True):
+        super(GNS, self).__init__()
 
-train_loss = 0.
-for epoch in range(2001):
-    augmentation_nr = random.randint(1, 10)  # random augmentation of the 10
-    buses, lines, gens = prepare_grid(case_nr=n_bus, augmentation_nr=augmentation_nr)
-    pg_qg = gens[:, [G['Pg_set'], G['qg']]]
-    # make pg_qg_bus_size a tensor with size of buses shape[0], with 0s at the indices that are not bus_i in gens
-    pg_qg_bus_size = torch.zeros((buses.shape[0], 2), dtype=torch.float32)
-    pg_qg_bus_size[gens[:, 0].int()-1] = pg_qg  # -1 as bus indices start from 1
-    model.train()
-    data = Data(x=pg_qg_bus_size, edge_index=torch.tensor(lines[:, [0, 1]].T-1, dtype=torch.int64))
-    power = model(data)
-    Pi = power[0]
-    Qi = power[1]
-    Pd = buses[:, B['Pd']]
-    Qd = buses[:, B['Qd']]
-    optimizer.zero_grad()
-    # Pi = v*torch.sum(v*(B['Gs']*torch.cos(theta) + B['Bs']*torch.sin(theta)))
-    # Qi = v*torch.sum(v*(B['Gs']*torch.sin(theta) - B['Bs']*torch.cos(theta)))
-    # loss is MSE of every bus' Pg and qg and their real demand
-    loss = torch.sum(torch.mean((Pi - Pd)**2) + torch.mean((Qi - Qd)**2))
-    loss.backward()
-    optimizer.step()
-    train_loss += loss.item()
-    print(f'Epoch {epoch}: Loss: {train_loss}')
+        self.multiple_phis = multiple_phi  # if three different phi networks should be used for each L input or the same
+
+        if self.multiple_phis:
+            self.phi_v = nn.ModuleDict()
+            self.phi_theta = nn.ModuleDict()
+            self.phi_m = nn.ModuleDict()
+        else:
+            self.phi = nn.ModuleDict()
+
+        self.L_theta = nn.ModuleDict()
+        self.L_v = nn.ModuleDict()
+        self.L_m = nn.ModuleDict()
+
+        for k in range(K):
+            if self.multiple_phis:
+                self.phi_v[str(k)] = LearningBlock(5 + latent_dim, hidden_dim, latent_dim)
+                self.phi_theta[str(k)] = LearningBlock(5 + latent_dim, hidden_dim, latent_dim)
+                self.phi_m[str(k)] = LearningBlock(5 + latent_dim, hidden_dim, latent_dim)
+            else:
+                self.phi[str(k)] = LearningBlock(5 + latent_dim, hidden_dim, 1)
+
+            self.L_theta[str(k)] = LearningBlock(dim_in=4 + 2 * latent_dim, hidden_dim=hidden_dim, dim_out=1)
+            self.L_v[str(k)] = LearningBlock(dim_in=4 + 2 * latent_dim, hidden_dim=hidden_dim, dim_out=1)
+            self.L_m[str(k)] = LearningBlock(dim_in=4 + 2 * latent_dim, hidden_dim=hidden_dim, dim_out=latent_dim)
+
+        self.latent_dim = latent_dim
+        self.gamma = gamma
+        self.K = K
+
+    def forward(self, buses, lines, generators, B, L, G):
+        m = torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32)
+        theta = torch.zeros((buses.shape[0]), dtype=torch.float32)
+        total_loss = 0.
+        gen_idcs = torch.tensor(generators[:, G['bus_i']] - 1, dtype=torch.int64)
+        # make v the gen values, if no gen: 1 v
+        v = scatter_add(generators[:, G['vg']], gen_idcs, out=torch.zeros(buses.shape[0]), dim=0)
+        v = torch.where(v == 0, torch.ones_like(v), v)
+        # v[generators[:, G['bus_i']].long() - 1] = generators[:, G['vg']]
+        pg_new = scatter_add(generators[:, G['Pg']], gen_idcs, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
+        delta_p = pg_new - buses[:, B['Pd']] - buses[:, B['Gs']] * v.pow(2)
+        qg_new = scatter_add(generators[:, G['qg']], gen_idcs, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
+        delta_q = qg_new - buses[:, B['Qd']] + buses[:, B['Bs']] * v.pow(2)
+        dst = lines[:, 1].long() - 1
+        for k in range(self.K):
+            phi_from_input = torch.cat((m[dst], lines[:, 2:]), dim=1)
+            if self.multiple_phis:
+                phi_v_input = self.phi_v[str(k)](phi_from_input)
+                phi_theta_input = self.phi_theta[str(k)](phi_from_input)
+                phi_m_input = self.phi_m[str(k)](phi_from_input)
+
+                phi_v_sum = scatter_add(phi_v_input, dst, out=torch.zeros((buses.shape[0], self.latent_dim)), dim=0)
+                phi_theta_sum = scatter_add(phi_theta_input, dst, out=torch.zeros((buses.shape[0], self.latent_dim)), dim=0)
+                phi_m_sum = scatter_add(phi_m_input, dst, out=torch.zeros((buses.shape[0], self.latent_dim)), dim=0)
+
+                network_input_v = torch.cat((v.unsqueeze(1), theta.unsqueeze(1), delta_p.unsqueeze(1), delta_q.unsqueeze(1), m, phi_v_sum), dim=1)
+                network_input_theta = torch.cat((v.unsqueeze(1), theta.unsqueeze(1), delta_p.unsqueeze(1), delta_q.unsqueeze(1), m, phi_theta_sum), dim=1)
+                network_input_m = torch.cat((v.unsqueeze(1), theta.unsqueeze(1), delta_p.unsqueeze(1), delta_q.unsqueeze(1), m, phi_m_sum), dim=1)
+            else:
+                phi_input = self.phi[str(k)](torch.cat((m[dst], lines[:, 2:]), dim=1))
+                phi_sum = scatter_add(phi_input, dst, out=torch.zeros((buses.shape[0], self.latent_dim)), dim=0)
+                network_input = torch.cat((v.unsqueeze(1), theta.unsqueeze(1), delta_p.unsqueeze(1), delta_q.unsqueeze(1), m, phi_sum), dim=1)
+
+            if self.multiple_phis:
+                theta_update = self.L_theta[str(k)](network_input_theta)
+                v_update = self.L_v[str(k)](network_input_v)
+                m_update = self.L_m[str(k)](network_input_m)
+            else:
+                theta_update = self.L_theta[str(k)](network_input)
+                v_update = self.L_v[str(k)](network_input)
+                m_update = self.L_m[str(k)](network_input)
+
+            theta = theta + theta_update.squeeze()
+
+            non_gens_mask = torch.ones_like(v, dtype=torch.bool)
+            non_gens_mask[generators[:, G['bus_i']].long() - 1] = False
+            v = torch.where(non_gens_mask, v + v_update.squeeze(), v)
+
+            m = m + m_update
+
+            Pg_new, qg_new = global_active_compensation(v, theta, buses, lines, generators, B, L, G)
+
+            delta_p, delta_q = local_power_imbalance(v, theta, buses, lines, generators, Pg_new, qg_new, B, L, G)
+
+            # rng_o1 = torch.rand(1)
+            # if rng_o1 < self.K/300 and k == self.K-1:
+            #     print(f'delta_p: {delta_p.data[:7]}')
+            #     print(f'delta_q: {delta_q.data[:7]}')
+            total_loss = total_loss + self.gamma**(self.K - k) * torch.sum(delta_p.pow(2) + delta_q.pow(2)).div(buses.shape[0])
+        last_loss = torch.sum(delta_p.pow(2) + delta_q.pow(2)).div(buses.shape[0])
+        # v can only be positive and theta between -pi and pi
+        v = torch.where(v < 0, torch.zeros_like(v), v)
+        # theta = torch.remainder(theta + torch.pi, 2 * torch.pi) - torch.pi
+        return v, theta, total_loss, last_loss
+
+
+def main():
+    # "Weights and Biases" aka wandb model tracking
+    wandb.login(key="d234bc98a4761bff39de0e5170df00094ac42269")
+
+    # initialization
+    latent_dim = 10  # increase later
+    hidden_dim = 10  # increase later
+    gamma = 0.9
+    K = 2  # correction updates, 30 in paper, less for debugging
+    multiple_phi = True
+    # params = {'latent_dim': [10, 20],
+    #           'hidden_dim': [10],  # TODO: maybe also try more or less hidden dim
+    #           'K': [2, 4, 6],
+    #           'multiple_phi': [False, True]}
+    #
+    # parameter_grid = itertools.product(*params.values())
+
+    # for params_i, parameter_set in enumerate(parameter_grid):
+    #     latent_dim, hidden_dim, K, multiple_phi = parameter_set
+    #     print(f'Parameter run: Latent dim: {latent_dim}, Hidden dim: {hidden_dim}, K: {K}, Multiple Phis: {multiple_phi}')
+    start = time.time()  # measure time
+
+    model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K, gamma=gamma, multiple_phi=multiple_phi)
+    # model.load_state_dict(torch.load(f'../models/Finished models/best_model_c14_K6_L10_H10_True_optimAdam.pth'))
+
+    # # comment CUDA code below for CPU usage
+    # if torch.cuda.is_available():
+    #     torch.set_default_device('cuda')
+    #     model.to('cuda')
+
+    epochs = 10**2+1  # 10**6 used in paper
+    lr = 0.001
+    # optimizer_name = 'Adagrad'
+    optimizer_name = "Adam"
+    if optimizer_name == 'Adagrad':
+        lr = 0.01
+        optimizer = torch.optim.Adagrad(model.parameters(), lr=lr)  # 0.01 is default for Adagrad
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    # warmup_steps = 24
+    # lambda1 = lambda step: (lr ** (1 - step / warmup_steps)) if step < warmup_steps else 1
+    # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
+
+    best_loss = torch.tensor(float('inf'))
+    loss_increase_counter = 0
+    case_nr = 14  # 14, 30, 118, 300
+    batch_size = 2**7  # 2**7==128
+    print_every = 1
+    nr_samples = 2**10  # 2**10==1024
+    all_buses, all_lines, all_generators = load_all_grids(case_nr, nr_samples=nr_samples)
+
+    wandb_run = wandb.init(
+        project="GNS",
+        name=f"K{K}, L{latent_dim}, H{hidden_dim}, mul phi: {multiple_phi}",
+        config={
+            "learning_rate": lr,
+            "optimizer": optimizer_name,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "nr_samples": nr_samples,
+            "latent_dim": latent_dim,
+            "hidden_dim": hidden_dim,
+            "case_nr": case_nr,
+            "K": K,
+            "nr_samples": nr_samples,
+            "gamma": gamma,
+            "Multiple Phis": model.multiple_phis})
+
+    for epoch in range(epochs):
+        epoch_final_losses = torch.zeros(nr_samples // batch_size)
+        for batch_idx_start in range(0, nr_samples, batch_size):
+            losses = torch.zeros(batch_size)
+            last_losses = torch.zeros(batch_size)
+            for i in range(batch_idx_start, batch_idx_start + batch_size):
+                buses, lines, generators = all_buses[i], all_lines[i], all_generators[i]
+                v, theta, loss, last_loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
+                losses[i % batch_size] = loss
+                last_losses[i % batch_size] = last_loss.data
+            total_loss = torch.mean(losses)
+            epoch_final_losses[batch_idx_start // batch_size] = torch.mean(last_losses)
+
+            # print(f'Run: {epoch}, Batch Loss: {total_loss}')
+            total_loss.backward()
+            optimizer.step()
+            # scheduler.step()  # Update the learning rate
+            optimizer.zero_grad()
+
+        epoch_final_loss = torch.mean(epoch_final_losses)
+        wandb.log({"Final Loss": epoch_final_loss})
+
+        if epoch_final_loss >= best_loss:
+            loss_increase_counter += 1
+            if loss_increase_counter > 5:
+                print('Loss is increasing')
+        else:
+            best_loss = epoch_final_loss
+            best_model = model
+            loss_increase_counter = 0
+
+        if epoch % print_every == 0:
+            print(f'Epoch: {epoch}, Final Loss: {epoch_final_loss}, best loss: {best_loss}')
+            torch.save(best_model.state_dict(),
+                       f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_{multiple_phi}_optim{optimizer_name}.pth')
+        # if epoch == 100:  # epoch starts at 0
+        #     # make model a instance of wandb.Artifact
+        #     best_model = wandb.Artifact(f'best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_{multiple_phi}_L{torch.ceil(epoch_final_loss)}.pth', type='model')
+        #     wandb.log_artifact(best_model)
+        # save as model
+    wandb_run.finish()
+    end = time.time()
+    with open(f'time_logs.txt', 'a') as f:
+        f.write(f'Latent dim: {latent_dim}, Hidden dim: {hidden_dim}, K: {K}, Multiple Phis: {multiple_phi}, Time: {end-start}\n')
+
+
+if __name__ == '__main__':
+    main()
 

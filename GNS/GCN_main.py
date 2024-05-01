@@ -139,14 +139,16 @@ class GNS(nn.Module):
 
     def forward(self, buses, lines, generators, B, L, G):
         m = torch.zeros((buses.shape[0], self.latent_dim), dtype=torch.float32)
-        v = torch.ones((buses.shape[0]), dtype=torch.float32)
         theta = torch.zeros((buses.shape[0]), dtype=torch.float32)
         total_loss = 0.
-        bus_i = torch.tensor(generators[:, G['bus_i']] - 1, dtype=torch.int64)
-        v[generators[:, G['bus_i']].long() - 1] = generators[:, G['vg']]
-        pg_new = scatter_add(generators[:, G['Pg']], bus_i, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
+        gen_idcs = torch.tensor(generators[:, G['bus_i']] - 1, dtype=torch.int64)
+        # make v the gen values, if no gen: 1 v
+        v = scatter_add(generators[:, G['vg']], gen_idcs, out=torch.zeros(buses.shape[0]), dim=0)
+        v = torch.where(v == 0, torch.ones_like(v), v)
+        # v[generators[:, G['bus_i']].long() - 1] = generators[:, G['vg']]
+        pg_new = scatter_add(generators[:, G['Pg']], gen_idcs, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
         delta_p = pg_new - buses[:, B['Pd']] - buses[:, B['Gs']] * v.pow(2)
-        qg_new = scatter_add(generators[:, G['qg']], bus_i, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
+        qg_new = scatter_add(generators[:, G['qg']], gen_idcs, out=torch.zeros((buses.shape[0]), dtype=torch.float32), dim=0)
         delta_q = qg_new - buses[:, B['Qd']] + buses[:, B['Bs']] * v.pow(2)
         dst = lines[:, 1].long() - 1
         for k in range(self.K):
@@ -195,6 +197,8 @@ class GNS(nn.Module):
             #     print(f'delta_q: {delta_q.data[:7]}')
             total_loss = total_loss + self.gamma**(self.K - k) * torch.sum(delta_p.pow(2) + delta_q.pow(2)).div(buses.shape[0])
         last_loss = torch.sum(delta_p.pow(2) + delta_q.pow(2)).div(buses.shape[0])
+        # v can only be positive and theta between -pi and pi
+        v = torch.where(v < 0, torch.zeros_like(v), v)
         return v, theta, total_loss, last_loss
 
 
@@ -206,108 +210,112 @@ def main():
     latent_dim = 10  # increase later
     hidden_dim = 10  # increase later
     gamma = 0.9
-    K = 6  # correction updates, 30 in paper, less for debugging
+    K = 15  # correction updates, 30 in paper, less for debugging
     multiple_phi = True
-    params = {'latent_dim': [10, 20],
-              'hidden_dim': [10],  # TODO: maybe also try more or less hidden dim
-              'K': [2, 4, 6],
-              'multiple_phi': [False, True]}
+    # params = {'latent_dim': [10, 20],
+    #           'hidden_dim': [10],  # TODO: maybe also try more or less hidden dim
+    #           'K': [2, 4, 6],
+    #           'multiple_phi': [False, True]}
+    #
+    # parameter_grid = itertools.product(*params.values())
 
-    parameter_grid = itertools.product(*params.values())
+    # for params_i, parameter_set in enumerate(parameter_grid):
+    #     latent_dim, hidden_dim, K, multiple_phi = parameter_set
+    #     print(f'Parameter run: Latent dim: {latent_dim}, Hidden dim: {hidden_dim}, K: {K}, Multiple Phis: {multiple_phi}')
+    #     start = time.time()  # measure time
 
-    for params_i, parameter_set in enumerate(parameter_grid):
-        latent_dim, hidden_dim, K, multiple_phi = parameter_set
-        print(f'Parameter run: Latent dim: {latent_dim}, Hidden dim: {hidden_dim}, K: {K}, Multiple Phis: {multiple_phi}')
-        start = time.time()  # measure time
+    model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K, gamma=gamma, multiple_phi=multiple_phi)
+    # model.load_state_dict(torch.load(f'../models/Finished models/best_model_c14_K6_L10_H10_True_optimAdam.pth'))
 
-        model = GNS(latent_dim=latent_dim, hidden_dim=hidden_dim, K=K, gamma=gamma, multiple_phi=multiple_phi)
+    # # comment CUDA code below for CPU usage
+    # if torch.cuda.is_available():
+    #     torch.set_default_device('cuda')
+    #     model.to('cuda')
 
-        # # comment CUDA code below for CPU usage
-        # if torch.cuda.is_available():
-        #     torch.set_default_device('cuda')
-        #     model.to('cuda')
+    epochs = 10**2+1  # 10**6 used in paper
+    lr = 0.001
+    # optimizer_name = 'Adagrad'
+    optimizer_name = "Adam"
+    if optimizer_name == 'Adagrad':
+        lr = 0.01
+        optimizer = torch.optim.Adagrad(model.parameters(), lr=lr)  # 0.01 is default for Adagrad
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-        epochs = 10**2+1  # 10**6 used in paper
-        lr = 0.001
-        # optimizer_name = 'Adagrad'
-        optimizer_name = "Adam"
-        if optimizer_name == 'Adagrad':
-            optimizer = torch.optim.Adagrad(model.parameters(), lr=lr*10)  # 0.01 is default for Adagrad
+    # warmup_steps = 24
+    # lambda1 = lambda step: (lr ** (1 - step / warmup_steps)) if step < warmup_steps else 1
+    # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
+
+    best_loss = torch.tensor(float('inf'))
+    loss_increase_counter = 0
+    case_nr = 14  # 14, 30, 118, 300
+    batch_size = 2**7  # 2**7==128
+    print_every = 1
+    nr_samples = 2**8  # 2**10==1024
+    all_buses, all_lines, all_generators = load_all_grids(case_nr, nr_samples=nr_samples)
+
+    wandb_run = wandb.init(
+        project="GNS",
+        name=f"K{K}, L{latent_dim}, H{hidden_dim}, mul phi: {multiple_phi}",
+        config={
+            "learning_rate": lr,
+            "optimizer": optimizer_name,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "nr_samples": nr_samples,
+            "latent_dim": latent_dim,
+            "hidden_dim": hidden_dim,
+            "case_nr": case_nr,
+            "K": K,
+            "nr_samples": nr_samples,
+            "gamma": gamma,
+            "Multiple Phis": model.multiple_phis})
+
+    for epoch in range(epochs):
+        epoch_final_losses = torch.zeros(nr_samples // batch_size)
+        for batch_idx_start in range(0, nr_samples, batch_size):
+            losses = torch.zeros(batch_size)
+            last_losses = torch.zeros(batch_size)
+            for i in range(batch_idx_start, batch_idx_start + batch_size):
+                buses, lines, generators = all_buses[i], all_lines[i], all_generators[i]
+                v, theta, loss, last_loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
+                losses[i % batch_size] = loss
+                last_losses[i % batch_size] = last_loss.data
+            total_loss = torch.mean(losses)
+            epoch_final_losses[batch_idx_start // batch_size] = torch.mean(last_losses)
+
+            # print(f'Run: {epoch}, Batch Loss: {total_loss}')
+            total_loss.backward()
+            optimizer.step()
+            # scheduler.step()  # Update the learning rate
+            optimizer.zero_grad()
+
+        epoch_final_loss = torch.mean(epoch_final_losses)
+        wandb.log({"Final Loss": epoch_final_loss})
+
+        if epoch_final_loss >= best_loss:
+            loss_increase_counter += 1
+            if loss_increase_counter > 2:
+                print('Loss is increasing')
+                break
         else:
-            optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+            best_loss = epoch_final_loss
+            best_model = model
+            loss_increase_counter = 0
 
-        # warmup_steps = 24
-        # lambda1 = lambda step: (lr ** (1 - step / warmup_steps)) if step < warmup_steps else 1
-        # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
-
-        best_loss = torch.tensor(float('inf'))
-        loss_increase_counter = 0
-        case_nr = 14  # 14, 30, 118, 300
-        batch_size = 2**7  # 2**7==128
-        print_every = 25
-        nr_samples = 2**10  # 2**10==1024
-        all_buses, all_lines, all_generators = load_all_grids(case_nr, nr_samples=nr_samples)
-
-        wandb_run = wandb.init(
-            project="GNS",
-            config={
-                "learning_rate": lr,
-                "optimizer": optimizer_name,
-                "epochs": epochs,
-                "batch_size": batch_size,
-                "nr_samples": nr_samples,
-                "latent_dim": latent_dim,
-                "hidden_dim": hidden_dim,
-                "case_nr": case_nr,
-                "K": K,
-                "nr_samples": nr_samples,
-                "gamma": gamma,
-                "Multiple Phis": model.multiple_phis})
-
-        for epoch in range(epochs):
-            epoch_final_losses = torch.zeros(nr_samples // batch_size)
-            for batch_idx_start in range(0, nr_samples, batch_size):
-                losses = torch.zeros(batch_size)
-                last_losses = torch.zeros(batch_size)
-                for i in range(batch_idx_start, batch_idx_start + batch_size):
-                    buses, lines, generators = all_buses[i], all_lines[i], all_generators[i]
-                    v, theta, loss, last_loss = model(buses=buses, lines=lines, generators=generators, B=B, L=L, G=G)
-                    losses[i % batch_size] = loss
-                    last_losses[i % batch_size] = last_loss.data
-                total_loss = torch.mean(losses)
-                epoch_final_losses[batch_idx_start // batch_size] = torch.mean(last_losses)
-
-                # print(f'Run: {epoch}, Batch Loss: {total_loss}')
-                total_loss.backward()
-                optimizer.step()
-                # scheduler.step()  # Update the learning rate
-                optimizer.zero_grad()
-
-            epoch_final_loss = torch.mean(epoch_final_losses)
-            wandb.log({"Final Loss": epoch_final_loss})
-
-            if epoch_final_loss >= best_loss:
-                loss_increase_counter += 1
-                if loss_increase_counter > 100:
-                    print('Loss is increasing')
-            else:
-                best_loss = epoch_final_loss
-                best_model = model
-                loss_increase_counter = 0
-
-            if epoch % print_every == 0:
-                print(f'Epoch: {epoch}, Final Loss: {epoch_final_loss}, best loss: {best_loss}')
-                torch.save(best_model.state_dict(),
-                           f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_{multiple_phi}_optim{optimizer_name}.pth')
-            # if epoch == 100:  # epoch starts at 0
-            #     # make model a instance of wandb.Artifact
-            #     best_model = wandb.Artifact(f'best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_{multiple_phi}_L{torch.ceil(epoch_final_loss)}.pth', type='model')
-            #     wandb.log_artifact(best_model)
-            # save as model
-        wandb_run.finish()
-        end = time.time()
-        with open(f'time_logs.txt', 'a') as f:
-            f.write(f'Latent dim: {latent_dim}, Hidden dim: {hidden_dim}, K: {K}, Multiple Phis: {multiple_phi}, Time: {end-start}\n')
+        if epoch % print_every == 0:
+            print(f'Epoch: {epoch}, Final Loss: {epoch_final_loss}, best loss: {best_loss}')
+            torch.save(best_model.state_dict(),
+                       f'../models/best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_{multiple_phi}_optim{optimizer_name}.pth')
+        # if epoch == 100:  # epoch starts at 0
+        #     # make model a instance of wandb.Artifact
+        #     best_model = wandb.Artifact(f'best_model_c{case_nr}_K{K}_L{latent_dim}_H{hidden_dim}_{multiple_phi}_L{torch.ceil(epoch_final_loss)}.pth', type='model')
+        #     wandb.log_artifact(best_model)
+        # save as model
+    wandb_run.finish()
+    end = time.time()
+    with open(f'time_logs.txt', 'a') as f:
+        f.write(f'Latent dim: {latent_dim}, Hidden dim: {hidden_dim}, K: {K}, Multiple Phis: {multiple_phi}, Time: {end-start}\n')
 
 
 if __name__ == '__main__':
