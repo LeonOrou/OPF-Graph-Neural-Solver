@@ -6,11 +6,14 @@ Optimal Power Flow: Predicting v and theta at each bus of a MATPOWER power grid,
 ## Usage:
 (Using pypower for case importation and running comparison algorithms)
 
-Either take data from /data/ or run `augment_grids.py` and replace the case nr with the one desired
+Either take data from /data/ or run `augment_grids.py` and replace the case nr with the one desired.
 
-For running your own model, import the `GNS` class and initialize `model()` with the hyperparameters desired and `torch.load_state_dict(PATH_TO_MODEL)`
+For running your own model, import the `GNS` class and initialize `model()` with the hyperparameters desired and `torch.load_state_dict(PATH_TO_MODEL)`.
+The best performing hyperparameters are: K=4, latent_dim=20, hidden_dim=10, multiple_phi=True, gamma=0.9. You may also adapt the learning rate, batch_size, nr_samples, epochs, optimizer, or the learning rate scheduler. 
 
-For evaluation, choose a desired case and test size and initialize model as stated above. Just run the script afterwards
+For controlling the training, use your own "Weights and Biases" login key and change the config as wanted.
+
+For evaluation, choose a desired case and test size and initialize model as stated above. Just run the script afterwards.
 
 
 
