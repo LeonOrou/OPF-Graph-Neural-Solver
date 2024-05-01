@@ -9,7 +9,7 @@ for copying the environment libraries.
 ## Usage:
 (Using pypower for case importation and running comparison algorithms)
 
-Either take data from /data/ or run `augment_grids.py` and replace the case nr with the one desired.
+Either take data from /data/ or run `augment_grids.py` and replace case_nr with the one desired (9, 14, 30, 118, or 300).
 
 For running your own model, import the `GNS` class and initialize `model()` with the hyperparameters desired and `torch.load_state_dict(PATH_TO_MODEL)`.
 The best performing hyperparameters are: K=4, latent_dim=20, hidden_dim=10, multiple_phi=True, gamma=0.9. You may also adapt the learning rate, batch_size, nr_samples, epochs, optimizer, or the learning rate scheduler inside `main.py`. 
