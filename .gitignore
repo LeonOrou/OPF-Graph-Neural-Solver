@@ -7,11 +7,9 @@
 __pycache__/
 /copilot/chatSessions
 .venv/
-data/
 .vscode/
 Interesting Papers/
 /Manos GNN notes.docx
-Interesting Papers/
 images/
 GNS/test.py
 
