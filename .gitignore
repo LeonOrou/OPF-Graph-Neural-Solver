@@ -14,7 +14,7 @@
 /.gitattributes
 /Interesting Papers
 /images
-/test.py
+/GNS/test.py
 
 # Ignore everything
 *
@@ -25,7 +25,7 @@
 !*.md
 !/GNS/wandb/
 
-# Also don't ignore specific files
 .gitignore
+.gitattributes
 
 
