@@ -4,17 +4,16 @@
 # Datasource local storage ignored files
 # /dataSources/
 # /dataSources.local.xml
+__pycache__/
 /copilot/chatSessions
-/.venv
-/.idea
-/data
-/.vscode/
-/Interesting Papers
+.venv/
+data/
+.vscode/
+Interesting Papers/
 /Manos GNN notes.docx
-/.gitattributes
-/Interesting Papers
-/images
-/GNS/test.py
+Interesting Papers/
+images/
+GNS/test.py
 
 # Ignore everything
 *
