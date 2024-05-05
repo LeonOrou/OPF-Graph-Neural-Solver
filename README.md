@@ -8,7 +8,7 @@ Use
 for copying the environment libraries.
 
 ## Usage:
-(Using pypower for case importation and running comparison algorithms)
+(Using pypower for case importation and running comparison algorithms, the code is CPU optimized)
 
 Either take data from /data/ or run `augment_grids.py` and replace case_nr with the one desired (9, 14, 30, 118, or 300).
 
