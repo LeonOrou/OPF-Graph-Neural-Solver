@@ -1,5 +1,5 @@
 # Graph Neural Solver
-This Work is based on the paper "Neural Networks for Power Flow: Graph Neural Solver" by Donon, Balthazar, et al.
+This work is based on the paper "Neural Networks for Power Flow: Graph Neural Solver" by Donon, Balthazar, et al.
 The goal of this work is to predicting v and theta at each bus of a MATPOWER power grid, scientific paper in process.
 
 Use
