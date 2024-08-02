@@ -1,5 +1,6 @@
 # Graph Neural Solver
-Optimal Power Flow: Predicting v and theta at each bus of a MATPOWER power grid, scientific paper in process.
+This work is based on the paper "Neural Networks for Power Flow: Graph Neural Solver" by Donon, Balthazar, et al.
+The goal of this work is to predicting v and theta at each bus of a MATPOWER power grid, scientific paper in process.
 
 Use
 > pip install -r requirements.txt
@@ -7,7 +8,7 @@ Use
 for copying the environment libraries.
 
 ## Usage:
-(Using pypower for case importation and running comparison algorithms)
+(Using pypower for case importation and running comparison algorithms, the code is CPU optimized)
 
 Either take data from /data/ or run `augment_grids.py` and replace case_nr with the one desired (9, 14, 30, 118, or 300).
 
