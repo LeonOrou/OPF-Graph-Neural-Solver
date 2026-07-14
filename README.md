@@ -1,6 +1,6 @@
 # Graph Neural Solver
 This work is based on the paper "Neural Networks for Power Flow: Graph Neural Solver" by Donon, Balthazar, et al.
-The goal of this work is to predicting v and theta at each bus of a MATPOWER power grid, paper can be found [here](https://1drv.ms/b/c/b834fc234b1005bc/EQ67IVZA72FFnAKtYG4nmtIB8bbJwJ1h7C6vWraML-N7VA?e=kwbn08).
+The goal of this work is to predicting v and theta at each bus of a MATPOWER power grid, paper can be found [here]([https://1drv.ms/b/c/b834fc234b1005bc/EQ67IVZA72FFnAKtYG4nmtIB8bbJwJ1h7C6vWraML-N7VA?e=kwbn08](https://drive.google.com/file/d/1mstJIg23Qqbw5eRdZWL3z1w2NrFTDV7b/view?usp=sharing)).
 
 Use
 > pip install -r requirements.txt
